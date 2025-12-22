@@ -1,21 +1,25 @@
-const { Login, ChangePassword ,logout,refreshAccessToken } = require("../Controller/AuthLogic");
+/**
+ * Authentication Routes
+ * Handles login, logout, token refresh, password change, and token verification
+ */
+const { 
+  Login, 
+  Logout,
+  ChangePassword, 
+  RefreshToken,
+  VerifyToken
+} = require("../Controller/AuthLogic");
 const { verifyToken } = require("../utils/config jwt");
 const express = require("express");
 const router = express.Router();
 
-router.route("/login").post(Login);
-router.route("/change-password").post(verifyToken, ChangePassword);
-router.post("/logout", verifyToken, logout);
-router.post("/refresh-token", refreshAccessToken);
-router.get("/verify-token", verifyToken, (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: "Token is valid",
-    user: {
-      id: req.user.id,
-      email: req.user.email,
-      role: req.user.role,
-    },
-  });
-});
+// Public routes (no auth required)
+router.post("/login", Login);
+router.post("/refresh-token", RefreshToken);
+
+// Protected routes (auth required)
+router.post("/logout", verifyToken, Logout);
+router.post("/change-password", verifyToken, ChangePassword);
+router.get("/verify-token", verifyToken, VerifyToken);
+
 module.exports = router;
