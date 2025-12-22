@@ -17,7 +17,7 @@ const transporter = nodemailer.createTransport({
 async function sendMail(to, subject, text, html) {
   try {
     // Define the image path on the server
-    const imagePath = path.join("/www/wwwroot/DMS_Server/Images", "Promark Techsolutions Pvt Ltd.jpg");
+    const imagePath = path.join("/www/wwwroot/DMS_Server/Images", "Promark Techsolutions Pvt Ltd.jpeg");
 
     // Send email with attachment
     await transporter.sendMail({
@@ -28,7 +28,7 @@ async function sendMail(to, subject, text, html) {
       html,
       attachments: [
         {
-          filename: "Promark Techsolutions Pvt Ltd.jpg",
+          filename: "Promark Techsolutions Pvt Ltd.jpeg",
           path: imagePath,
           cid: "middle-image",
         },
