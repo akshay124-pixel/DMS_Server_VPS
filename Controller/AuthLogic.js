@@ -2,7 +2,7 @@ const User = require("../Schema/Model");
 const bcrypt = require("bcryptjs");
 const { generateToken, generateRefreshToken, verifyRefreshToken } = require("../utils/config jwt");
 
-// Signup Controller  check
+// Signup Controller  
 const Signup = async (req, res) => {
   try {
     const { username, email, password, role } = req.body;
