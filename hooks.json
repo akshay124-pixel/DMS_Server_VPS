@@ -1,0 +1,14 @@
+[
+  {
+    "id": "deploy-dms",
+    "execute-command": "/bin/bash",
+    "command-working-directory": "/www/wwwroot/DMS_Server",
+    "pass-arguments-to-command": [
+      {
+        "source": "string",
+        "name": "deploy.sh"
+      }
+    ],
+    "response-message": "DMS Deploy Started Successfully"
+  }
+]
