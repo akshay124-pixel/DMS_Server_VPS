@@ -4,6 +4,10 @@ echo "🚀 Starting DMS Deployment..."
 
 cd /www/wwwroot/DMS_Server || exit 1
 
+echo "🧹 Cleaning local changes..."
+git reset --hard
+git clean -fd
+
 echo "⬇️ Pulling latest code..."
 git pull origin main
 
