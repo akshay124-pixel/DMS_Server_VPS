@@ -628,8 +628,8 @@ const sendEntryEmail = async (req, res) => {
           body { font-family: 'Poppins', Arial, sans-serif; background-color: #f4f6f9; margin: 0; padding: 0; }
           .container { max-width: 850px; margin: 40px auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 20px rgba(0,0,0,0.15); }
           .content { padding: 0px; text-align: center; }
-          .content img { max-width: 100%; height: auto; display: block; margin: 0 auto; border-radius: 50px; }
-          .content .middle-image { max-width: 800px; min-height: 400px; margin: 50px auto; padding: 20px; border: 2px solid #e0e0e0; background-color: #f9f9f9; box-shadow: 0 8px 20px rgba(0,0,0,0.15); vertical-align: middle; }
+          .content img { max-width: 100%; height: auto; display: block; margin: 0 auto; border-radius: 20px; }
+          .content .middle-image { max-width: 800px; min-height: 400px; margin: 50px auto; padding: 10px; border: 2px solid #e0e0e0; background-color: #f9f9f9; box-shadow: 0 8px 20px rgba(0,0,0,0.15); vertical-align: middle; }
           @media (max-width: 600px) {
             .container { margin: 10px; width: 100%; }
             .content { padding: 20px 10px; }
