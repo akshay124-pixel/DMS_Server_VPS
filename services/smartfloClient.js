@@ -281,6 +281,68 @@ class SmartfloClient {
   }
 
   /**
+   * Get active calls
+   */
+  async getActiveCalls() {
+    return await this.makeRequest("GET", "/v1/active_calls");
+  }
+
+  /**
+   * Hangup a call
+   * @param {string} callId - Call ID to hangup
+   */
+  async hangupCall(callId) {
+    return await this.makeRequest("POST", `/v1/call/${callId}/hangup`);
+  }
+
+  /**
+   * Transfer a call
+   * @param {string} callId - Call ID to transfer
+   * @param {string} transferTo - Number to transfer to
+   * @param {string} transferType - Type: blind or attended
+   */
+  async transferCall(callId, transferTo, transferType = "blind") {
+    const payload = {
+      transfer_to: transferTo,
+      transfer_type: transferType,
+    };
+    return await this.makeRequest("POST", `/v1/call/${callId}/transfer`, payload);
+  }
+
+  /**
+   * Hold/Unhold a call
+   * @param {string} callId - Call ID
+   * @param {string} action - Action: hold or unhold
+   */
+  async holdCall(callId, action = "hold") {
+    return await this.makeRequest("POST", `/v1/call/${callId}/${action}`);
+  }
+
+  /**
+   * Get call status
+   * @param {string} callId - Call ID
+   */
+  async getCallStatus(callId) {
+    return await this.makeRequest("GET", `/v1/call/${callId}/status`);
+  }
+
+  /**
+   * Get recording URL
+   * @param {string} callId - Call ID
+   */
+  async getRecordingUrl(callId) {
+    return await this.makeRequest("GET", `/v1/call/${callId}/recording`);
+  }
+
+  /**
+   * Get recording status
+   * @param {string} recordingId - Recording ID
+   */
+  async getRecordingStatus(recordingId) {
+    return await this.makeRequest("GET", `/v1/recording/${recordingId}/status`);
+  }
+
+  /**
    * Test connection to Smartflo API
    */
   async testConnection() {

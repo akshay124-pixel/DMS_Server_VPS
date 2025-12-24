@@ -12,4 +12,5 @@ router.post("/entries", verifyToken, DataLogic.bulkUploadStocks);
 router.get("/user-role", verifyToken, DataLogic.getAdmin);
 router.get("/users", verifyToken, DataLogic.getUsers);
 router.post("/send-email", verifyToken, DataLogic.sendEntryEmail);
+router.post("/send-quotation", verifyToken, DataLogic.sendQuotationEmail);
 module.exports = router;

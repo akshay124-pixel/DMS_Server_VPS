@@ -672,9 +672,219 @@ const sendEntryEmail = async (req, res) => {
   }
 };
 
+
+// Send Quotation Email
+const sendQuotationEmail = async (req, res) => {
+  try {
+    const {
+      entryId,
+      productType,
+      specification,
+      quantity,
+      price,
+      customerEmail,
+      customerName,
+    } = req.body;
+
+    // Validate required fields
+    if (
+      !entryId ||
+      !productType ||
+      !specification ||
+      !quantity ||
+      !price ||
+      !customerEmail
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "All fields are required (entryId, productType, specification, quantity, price, customerEmail).",
+      });
+    }
+
+    // Validate entryId
+    if (!mongoose.Types.ObjectId.isValid(entryId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid entry ID provided.",
+      });
+    }
+
+    // Validate quantity and price
+    if (quantity <= 0 || price <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Quantity and price must be greater than 0.",
+      });
+    }
+
+    // Fetch the entry for authorization check
+    // Performance Optimization: Select only required fields and optimize populate
+    const entry = await Entry.findById(entryId)
+      .select("createdBy") // Only fetch createdBy field for authorization check
+      .populate({
+        path: "createdBy",
+        select: "username _id", // Only fetch username and _id from User collection
+        options: { lean: true } // Convert Mongoose document to plain JS object for better performance
+      });
+    if (!entry) {
+      return res.status(404).json({
+        success: false,
+        message: "Entry not found.",
+      });
+    }
+
+    // Authorization check
+    const normalizedRole =
+      req.user.role.charAt(0).toUpperCase() +
+      req.user.role.slice(1).toLowerCase();
+    if (
+      normalizedRole !== "Admin" &&
+      normalizedRole !== "Superadmin" &&
+      entry.createdBy._id.toString() !== req.user.id
+    ) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "You do not have permission to send a quotation for this entry.",
+      });
+    }
+
+    // Calculate total amount
+    const totalAmount = quantity * price;
+    const formattedPrice = price.toLocaleString("en-IN");
+    const formattedTotal = totalAmount.toLocaleString("en-IN");
+
+    // Email subject and content
+    const subject = `Quotation from Promark Techsolutions - ${productType}`;
+    const text = `Dear ${customerName},
+
+Thank you for your interest in Promark Techsolutions.
+
+Please find below the quotation details:
+
+Product Type: ${productType}
+Specification: ${specification}
+Quantity: ${quantity}
+Unit Price: ₹${formattedPrice}
+Total Amount: ₹${formattedTotal}
+
+We look forward to serving you.
+
+Best Regards,
+Promark Techsolutions Pvt Ltd
+A 22-year-old company with legacy in EdTech, AV, and Furniture
+Proudly part of "Make in India" initiative`;
+
+    const html = `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Quotation from Promark Techsolutions</title>
+        <style>
+          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; margin: 0; padding: 0; }
+          .container { max-width: 700px; margin: 40px auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
+          .header { background: linear-gradient(135deg, #6a11cb 0%, #2575fc 100%); padding: 30px; text-align: center; color: white; }
+          .header h1 { margin: 0; font-size: 28px; font-weight: 700; }
+          .header p { margin: 10px 0 0; font-size: 14px; opacity: 0.9; }
+          .content { padding: 40px 30px; }
+          .greeting { font-size: 18px; color: #333; margin-bottom: 20px; }
+          .quotation-box { background: #f8f9fa; border-left: 4px solid #6a11cb; padding: 20px; margin: 20px 0; border-radius: 8px; }
+          .quotation-box h2 { margin: 0 0 15px; color: #6a11cb; font-size: 20px; }
+          .quotation-item { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #e0e0e0; }
+          .quotation-item:last-child { border-bottom: none; }
+          .quotation-item .label { font-weight: 600; color: #555; }
+          .quotation-item .value { color: #333; font-weight: 500; }
+          .total-row { background: linear-gradient(135deg, #6a11cb 0%, #2575fc 100%); color: white; padding: 15px 20px; margin-top: 15px; border-radius: 8px; display: flex; justify-content: space-between; font-size: 18px; font-weight: 700; }
+          .footer { background: #f8f9fa; padding: 25px 30px; text-align: center; color: #666; font-size: 14px; line-height: 1.6; }
+          .footer strong { color: #333; }
+          @media (max-width: 600px) {
+            .container { margin: 10px; width: calc(100% - 20px); }
+            .content { padding: 20px 15px; }
+            .header h1 { font-size: 22px; }
+            .quotation-item { flex-direction: column; gap: 5px; }
+            .total-row { flex-direction: column; gap: 5px; text-align: center; }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>💼 QUOTATION</h1>
+            <p>Promark Techsolutions Pvt Ltd</p>
+          </div>
+          
+          <div class="content">
+            <p class="greeting">Dear <strong>${customerName}</strong>,</p>
+            <p>Thank you for your interest in <strong>Promark Techsolutions</strong>. We are pleased to provide you with the following quotation:</p>
+            
+            <div class="quotation-box">
+              <h2>📋 Quotation Details</h2>
+              <div class="quotation-item">
+                <span class="label">Product Type:</span>
+                <span class="value">${productType}</span>
+              </div>
+              <div class="quotation-item">
+                <span class="label">Specification:</span>
+                <span class="value">${specification}</span>
+              </div>
+              <div class="quotation-item">
+                <span class="label">Quantity:</span>
+                <span class="value">${quantity}</span>
+              </div>
+              <div class="quotation-item">
+                <span class="label">Unit Price:</span>
+                <span class="value">₹${formattedPrice}</span>
+              </div>
+              <div class="total-row">
+                <span>Total Amount:</span>
+                <span>₹${formattedTotal}</span>
+              </div>
+            </div>
+            
+            <p style="margin-top: 25px; color: #555; line-height: 1.6;">
+              We look forward to the opportunity to serve you and provide you with the best quality products and services.
+            </p>
+            <p style="color: #555; line-height: 1.6;">
+              Should you have any questions or require further information, please do not hesitate to contact us.
+            </p>
+          </div>
+          
+          <div class="footer">
+            <p><strong>Promark Techsolutions Pvt Ltd</strong></p>
+            <p>A 22-year-old company with a legacy in EdTech, AV, and Furniture</p>
+            <p>Owning its own factories, serving government, private, and autonomous organisations in India</p>
+            <p>Proudly part of the <strong>"Make in India"</strong> initiative</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    // Send email
+    await sendMail(customerEmail, subject, text, html);
+
+    res.status(200).json({
+      success: true,
+      message: `Quotation email sent successfully to ${customerEmail}.`,
+    });
+  } catch (error) {
+    console.error("Error sending quotation email:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Failed to send quotation email. Please try again later.",
+      error: error.message,
+    });
+  }
+};
+
+
 module.exports = {
   sendEntryEmail,
   bulkUploadStocks,
+  sendQuotationEmail,
   DataentryLogic,
   fetchEntries,
   DeleteData,

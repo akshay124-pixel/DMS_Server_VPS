@@ -1,6 +1,7 @@
 const CallLog = require("../Schema/CallLogModel");
 const User = require("../Schema/Model");
 const smartfloClient = require("../services/smartfloClient");
+const mongoose = require("mongoose");
 
 /**
  * Smartflo Analytics Controller
@@ -14,23 +15,34 @@ const smartfloClient = require("../services/smartfloClient");
 exports.getCallSummary = async (req, res) => {
   try {
     const { startDate, endDate, userId } = req.query;
+    const currentUser = req.user;
 
     // Build date filter
     const dateFilter = {};
+    
+    // RBAC - Role-based access control
+    if (currentUser.role !== "Admin" && currentUser.role !== "Superadmin") {
+      // For "Others" role, only show their own calls
+      // Convert string ID to ObjectId for proper MongoDB comparison
+      dateFilter.userId = mongoose.Types.ObjectId.createFromHexString(currentUser.id);
+    } else if (userId) {
+      // For Admin/Superadmin, allow filtering by specific user
+      dateFilter.userId = mongoose.Types.ObjectId.createFromHexString(userId);
+    }
+    
     if (startDate || endDate) {
       dateFilter.createdAt = {};
       if (startDate) dateFilter.createdAt.$gte = new Date(startDate);
-      if (endDate) dateFilter.createdAt.$lte = new Date(endDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        dateFilter.createdAt.$lte = end;
+      }
     } else {
       // Default to last 30 days
       const thirtyDaysAgo = new Date();
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
       dateFilter.createdAt = { $gte: thirtyDaysAgo };
-    }
-
-    // Add user filter if specified
-    if (userId) {
-      dateFilter.userId = userId;
     }
 
     // Aggregate call statistics
@@ -98,13 +110,26 @@ exports.getCallSummary = async (req, res) => {
 exports.getAgentPerformance = async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
+    const currentUser = req.user;
 
     // Build date filter
     const dateFilter = {};
+    
+    // RBAC - Role-based access control
+    if (currentUser.role !== "Admin" && currentUser.role !== "Superadmin") {
+      // For "Others" role, only show their own performance
+      // Convert string ID to ObjectId for proper MongoDB comparison
+      dateFilter.userId = mongoose.Types.ObjectId.createFromHexString(currentUser.id);
+    }
+    
     if (startDate || endDate) {
       dateFilter.createdAt = {};
       if (startDate) dateFilter.createdAt.$gte = new Date(startDate);
-      if (endDate) dateFilter.createdAt.$lte = new Date(endDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        dateFilter.createdAt.$lte = end;
+      }
     } else {
       // Default to last 30 days
       const thirtyDaysAgo = new Date();
@@ -255,13 +280,37 @@ exports.syncCDR = async (req, res) => {
  */
 exports.getCallTrends = async (req, res) => {
   try {
-    const { days = 30 } = req.query;
+    const { days = 30, startDate: queryStartDate, endDate: queryEndDate } = req.query;
+    const currentUser = req.user;
 
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - parseInt(days));
+    // Build filter
+    const filter = {};
+    
+    // RBAC - Role-based access control
+    if (currentUser.role !== "Admin" && currentUser.role !== "Superadmin") {
+      // For "Others" role, only show their own calls
+      // Convert string ID to ObjectId for proper MongoDB comparison
+      filter.userId = mongoose.Types.ObjectId.createFromHexString(currentUser.id);
+    }
+
+    // Date range
+    if (queryStartDate || queryEndDate) {
+      filter.createdAt = {};
+      if (queryStartDate) filter.createdAt.$gte = new Date(queryStartDate);
+      if (queryEndDate) {
+        const end = new Date(queryEndDate);
+        end.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = end;
+      }
+    } else {
+      // Default to last N days
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - parseInt(days));
+      filter.createdAt = { $gte: startDate };
+    }
 
     const trends = await CallLog.aggregate([
-      { $match: { createdAt: { $gte: startDate } } },
+      { $match: filter },
       {
         $group: {
           _id: {

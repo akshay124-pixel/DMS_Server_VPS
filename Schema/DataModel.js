@@ -117,7 +117,6 @@ const EntrySchema = new mongoose.Schema({
   smartfloLeadId: {
     type: String,
     trim: true,
-    sparse: true,
   },
   
   lastCallDate: {
@@ -135,6 +134,32 @@ const EntrySchema = new mongoose.Schema({
     min: 0,
   },
 });
+
+// 🔥 INDEXES FOR MASSIVE PERFORMANCE BOOST 🔥
+// Most used query: filter by user + sort by createdAt
+EntrySchema.index({ createdBy: 1, createdAt: -1 });
+
+// Status based filtering
+EntrySchema.index({ status: 1 });
+
+// Organization based filtering
+EntrySchema.index({ organization: 1 });
+
+// State + City filtering (very common in CRM)
+EntrySchema.index({ state: 1, city: 1 });
+
+// Sorting optimisation
+EntrySchema.index({ createdAt: -1 });
+EntrySchema.index({ updatedAt: -1 });
+
+// Text search (customer name + address)
+EntrySchema.index({ customerName: "text", address: "text" });
+
+// Mobile number search optimization
+EntrySchema.index({ mobileNumber: 1 });
+
+// Smartflo lead search optimization
+EntrySchema.index({ smartfloLeadId: 1 }, { sparse: true });
 
 EntrySchema.pre("save", function (next) {
   this.updatedAt = Date.now();
