@@ -9,6 +9,9 @@ const SmartfloDialerRouter = require("./Router/SmartfloDialerRouter");
 const SmartfloAdminRouter = require("./Router/SmartfloAdminRouter");
 const SmartfloWebhookRouter = require("./Router/SmartfloWebhookRouter");
 const SmartfloAnalyticsRouter = require("./Router/SmartfloAnalyticsRouter");
+const SmartfloCallHistoryRouter = require("./Router/SmartfloCallHistoryRouter");
+const SmartfloRecordingRouter = require("./Router/SmartfloRecordingRouter");
+const SmartfloActiveCallsRouter = require("./Router/SmartfloActiveCallsRouter");
 const app = express();
 const port = 3000;
 
@@ -37,6 +40,9 @@ app.use("/api/dialer", SmartfloDialerRouter);
 app.use("/api/smartflo", SmartfloAdminRouter);
 app.use("/api/webhooks/smartflo", SmartfloWebhookRouter);
 app.use("/api/analytics", SmartfloAnalyticsRouter);
+app.use("/api/calls", SmartfloCallHistoryRouter);
+app.use("/api/recordings", SmartfloRecordingRouter);
+app.use("/api/calls/active", SmartfloActiveCallsRouter);
 
 dbconnect()
   .then(() => {
