@@ -154,7 +154,7 @@ class SmartfloClient {
       agent_number: agentNumber,
       destination_number: destinationNumber,
       async: 1, // Async mode for immediate response
-      caller_id: callerId || process.env.SMARTFLO_DEFAULT_CALLER_ID,
+      caller_id: callerId, // ✅ Direct use, no fallback
       custom_identifier: customIdentifier,
     };
 

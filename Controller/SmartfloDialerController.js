@@ -40,27 +40,23 @@ exports.clickToCall = async (req, res) => {
       });
     }
 
-    if (!process.env.SMARTFLO_DEFAULT_CALLER_ID) {
-      return res.status(500).json({
-        success: false,
-        message: "SMARTFLO_DEFAULT_CALLER_ID is not configured on server",
-      });
-    }
-
+    // 3) Use user's agent number as caller ID (dynamic caller ID)
+    const callerId = user.smartfloAgentNumber; // ✅ KEY CHANGE
     const customIdentifier = `CRM_${leadId}_${Date.now()}`;
 
-    // 3) Smartflo API call
+    // 4) Smartflo API call with user's agent number as caller ID
     const payload = {
       agentNumber: user.smartfloAgentNumber,
       destinationNumber: lead.mobileNumber,
-      callerId: process.env.SMARTFLO_DEFAULT_CALLER_ID,
+      callerId: callerId, // ✅ Dynamic caller ID
       customIdentifier,
     };
 
     console.log("ClickToCall payload", {
       agentNumber: payload.agentNumber,
       destinationNumber: payload.destinationNumber,
-      callerId: payload.callerId,
+      callerId: payload.callerId, // ✅ अब user-specific होगी
+      username: user.username,
       customIdentifier,
     });
     const callResponse = await smartfloClient.clickToCall(payload);
@@ -72,7 +68,7 @@ exports.clickToCall = async (req, res) => {
       userId: user._id,
       agentNumber: user.smartfloAgentNumber,
       destinationNumber: lead.mobileNumber,
-      callerId: process.env.SMARTFLO_DEFAULT_CALLER_ID,
+      callerId: callerId, // ✅ Dynamic caller ID save होगी
       providerCallId: callResponse.call_id || callResponse.id,
       customIdentifier,
       callStatus: "initiated",
@@ -92,6 +88,7 @@ exports.clickToCall = async (req, res) => {
       callLogId: callLog._id,
       providerCallId: callLog.providerCallId,
       customIdentifier,
+      callerIdUsed: callerId, // ✅ Response में भी dynamic caller ID
     });
   } catch (error) {
     console.error(
