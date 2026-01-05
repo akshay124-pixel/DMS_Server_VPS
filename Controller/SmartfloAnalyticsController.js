@@ -45,24 +45,34 @@ exports.getCallSummary = async (req, res) => {
       dateFilter.createdAt = { $gte: thirtyDaysAgo };
     }
 
-    // Aggregate call statistics
+    // Aggregate call statistics with correct status logic
     const stats = await CallLog.aggregate([
       { $match: dateFilter },
       {
         $group: {
           _id: null,
           totalCalls: { $sum: 1 },
+          // Completed = call answered by agent (completed status)
           completedCalls: {
             $sum: { $cond: [{ $eq: ["$callStatus", "completed"] }, 1, 0] },
           },
+          // Answered = agent picked up (answered OR completed)
           answeredCalls: {
-            $sum: { $cond: [{ $eq: ["$callStatus", "answered"] }, 1, 0] },
+            $sum: {
+              $cond: [
+                { $in: ["$callStatus", ["answered", "completed"]] },
+                1,
+                0,
+              ],
+            },
           },
+          // Not Answered = agent didn't pick (no_answer status)
+          notAnsweredCalls: {
+            $sum: { $cond: [{ $eq: ["$callStatus", "no_answer"] }, 1, 0] },
+          },
+          // Failed = call not initiated / failed before connection
           failedCalls: {
             $sum: { $cond: [{ $eq: ["$callStatus", "failed"] }, 1, 0] },
-          },
-          noAnswerCalls: {
-            $sum: { $cond: [{ $eq: ["$callStatus", "no_answer"] }, 1, 0] },
           },
           totalDuration: { $sum: "$duration" },
           avgDuration: { $avg: "$duration" },
@@ -74,16 +84,18 @@ exports.getCallSummary = async (req, res) => {
       totalCalls: 0,
       completedCalls: 0,
       answeredCalls: 0,
+      notAnsweredCalls: 0,
       failedCalls: 0,
-      noAnswerCalls: 0,
       totalDuration: 0,
       avgDuration: 0,
     };
 
-    // Calculate connection rate
+    // Calculate connection rate = (answered calls / total initiated calls) * 100
+    // Total initiated = total calls that were attempted (not failed before connection)
+    const totalInitiated = summary.totalCalls - summary.failedCalls;
     summary.connectionRate =
-      summary.totalCalls > 0
-        ? ((summary.completedCalls / summary.totalCalls) * 100).toFixed(2)
+      totalInitiated > 0
+        ? ((summary.answeredCalls / totalInitiated) * 100).toFixed(2)
         : 0;
 
     // Format durations
@@ -131,10 +143,12 @@ exports.getAgentPerformance = async (req, res) => {
         dateFilter.createdAt.$lte = end;
       }
     } else {
-      // Default to last 30 days
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      dateFilter.createdAt = { $gte: thirtyDaysAgo };
+      // Default to today only
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      dateFilter.createdAt = { $gte: today, $lt: tomorrow };
     }
 
     // Aggregate by agent
@@ -218,7 +232,10 @@ exports.syncCDR = async (req, res) => {
     const from = fromDate || getYesterdayDate();
     const to = toDate || getTodayDate();
 
-    console.log(`Syncing CDR from ${from} to ${to}`);
+    // CDR sync operation logged only in development
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`Syncing CDR from ${from} to ${to}`);
+    }
 
     // Fetch CDR from Smartflo
     const cdrResponse = await smartfloClient.fetchCDR(from, to);
@@ -303,10 +320,12 @@ exports.getCallTrends = async (req, res) => {
         filter.createdAt.$lte = end;
       }
     } else {
-      // Default to last N days
-      const startDate = new Date();
-      startDate.setDate(startDate.getDate() - parseInt(days));
-      filter.createdAt = { $gte: startDate };
+      // Default to today only
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      filter.createdAt = { $gte: today, $lt: tomorrow };
     }
 
     const trends = await CallLog.aggregate([

@@ -7,7 +7,7 @@ const Entry = require("../Schema/DataModel");
 const User = require("../Schema/Model");
 const XLSX = require("xlsx");
 const { sendMail } = require("../utils/mailer");
-const { setcache, getCachedData, clearAllCache } = require("../Middleware/CacheMiddleware");
+const { smartInvalidate } = require("../Middleware/CacheMiddleware");
 
 /**
  * Sanitize phone number - extract last 10 digits
@@ -69,8 +69,10 @@ const DataentryLogic = async (req, res) => {
 
     await newEntry.save();
 
-    // Clear all cache on data mutation
-    clearAllCache();
+    // REAL-TIME: No cache to invalidate - data is always fresh
+    if (process.env.NODE_ENV === 'development') {
+      console.log("🔄 REAL-TIME: Entry created - no cache invalidation needed");
+    }
 
     res.status(201).json({
       success: true,
@@ -96,12 +98,179 @@ const DataentryLogic = async (req, res) => {
 };
 
 /**
- * fetchEntries - Fetch entries based on role with caching
+ * Build filter object from query parameters
+ */
+const buildFilter = (req, normalizedRole) => {
+  const filter = {};
+  const {
+    searchTerm,
+    selectedOrganization,
+    selectedStateA,
+    selectedCityA,
+    selectedCreatedBy,
+    startDate,
+    endDate,
+    status,
+    dashboardFilter,
+  } = req.query;
+
+  // DEBUG: Log the parameters being received
+  // Build filter for data queries - only log in development
+  if (process.env.NODE_ENV === 'development') {
+    console.log("🔍 buildFilter:", {
+      startDate,
+      endDate,
+      dashboardFilter,
+      searchTerm,
+      selectedOrganization,
+      selectedStateA,
+      selectedCityA,
+      selectedCreatedBy
+    });
+  }
+
+  // Role-based filtering
+  if (normalizedRole !== "Admin" && normalizedRole !== "Superadmin") {
+    filter.createdBy = mongoose.Types.ObjectId.createFromHexString(req.user.id);
+  }
+
+  // Search filter (customer name, address, mobile number)
+  if (searchTerm) {
+    filter.$or = [
+      { customerName: { $regex: searchTerm, $options: "i" } },
+      { address: { $regex: searchTerm, $options: "i" } },
+      { mobileNumber: { $regex: searchTerm, $options: "i" } },
+    ];
+  }
+
+  // Organization filter
+  if (selectedOrganization) {
+    filter.organization = selectedOrganization;
+  }
+
+  // State filter
+  if (selectedStateA) {
+    filter.state = selectedStateA;
+  }
+
+  // City filter
+  if (selectedCityA) {
+    filter.city = selectedCityA;
+  }
+
+  // Created by filter
+  if (selectedCreatedBy) {
+    // Need to lookup user by username
+    // This will be handled in the query with populate
+  }
+
+  // Date range filter - CRITICAL FIX: Only filter by createdAt to prevent previous month entries
+  if (startDate || endDate) {
+    if (process.env.NODE_ENV === 'development') {
+      console.log("🔍 Date filter - Raw dates:", { startDate, endDate });
+    }
+    
+    if (startDate && endDate) {
+      // TIMEZONE FIX: Parse dates as local dates, not UTC
+      const start = new Date(startDate + 'T00:00:00');
+      const end = new Date(endDate + 'T23:59:59.999');
+      
+      if (process.env.NODE_ENV === 'development') {
+        console.log("🔍 Date filter - Converted dates:", { 
+          start: start.toISOString(), 
+          end: end.toISOString(),
+          startLocal: start.toLocaleString(),
+          endLocal: end.toLocaleString()
+        });
+      }
+      
+      // CRITICAL: Use ONLY createdAt for date filtering to prevent unwanted entries
+      filter.createdAt = { $gte: start, $lte: end };
+      
+      // IMPORTANT: Clear any existing $or conditions that might conflict with date range
+      // This prevents monthly filters from overriding the specific date range
+      if (filter.$or) {
+        if (process.env.NODE_ENV === 'development') {
+          console.log("🚨 WARNING: Clearing $or filter to prevent date range conflicts");
+        }
+        delete filter.$or;
+      }
+      
+    } else if (startDate) {
+      const start = new Date(startDate + 'T00:00:00');
+      if (process.env.NODE_ENV === 'development') {
+        console.log("🔍 Date filter - Start only:", { start: start.toISOString() });
+      }
+      filter.createdAt = { $gte: start };
+    } else if (endDate) {
+      const end = new Date(endDate + 'T23:59:59.999');
+      if (process.env.NODE_ENV === 'development') {
+        console.log("🔍 Date filter - End only:", { end: end.toISOString() });
+      }
+      filter.createdAt = { $lte: end };
+    }
+  }
+
+  // Status filter
+  if (status) {
+    filter.status = status;
+  }
+
+  // Dashboard filter (leads, results, monthly, etc.)
+  if (dashboardFilter === "leads") {
+    filter.status = "Not Found";
+  } else if (dashboardFilter === "monthly") {
+    // CRITICAL FIX: Only apply monthly filter if no specific date range is provided
+    // When user selects specific dates, NEVER apply monthly filter to prevent date conflicts
+    if (!startDate && !endDate) {
+      const now = new Date();
+      const currentMonth = now.getMonth();
+      const currentYear = now.getFullYear();
+      filter.$or = [
+        {
+          $expr: {
+            $and: [
+              { $eq: [{ $month: "$createdAt" }, currentMonth + 1] },
+              { $eq: [{ $year: "$createdAt" }, currentYear] },
+            ],
+          },
+        },
+        {
+          $expr: {
+            $and: [
+              { $eq: [{ $month: "$updatedAt" }, currentMonth + 1] },
+              { $eq: [{ $year: "$updatedAt" }, currentYear] },
+            ],
+          },
+        },
+      ];
+    }
+    // IMPORTANT: If date range is provided, monthly filter is completely ignored
+    // This prevents the $or condition from overriding the specific date range filter
+  } else if (dashboardFilter === "Closed Won") {
+    filter.closetype = "Closed Won";
+  } else if (dashboardFilter === "Closed Lost") {
+    filter.closetype = "Closed Lost";
+  } else if (dashboardFilter && dashboardFilter !== "total" && dashboardFilter !== "results") {
+    filter.status = dashboardFilter;
+  }
+
+  // DEBUG: Log the final filter
+  console.log("🔍 Final filter:", JSON.stringify(filter, null, 2));
+
+  return filter;
+};
+
+/**
+ * fetchEntries - Fetch entries with pagination and filters
  */
 const fetchEntries = async (req, res) => {
   try {
     const normalizedRole = req.user.role.charAt(0).toUpperCase() + req.user.role.slice(1).toLowerCase();
-    console.log("fetchEntries: User ID:", req.user.id, "Role:", normalizedRole);
+    // Fetch entries request logged without sensitive user data
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📊 fetchEntries: Role:", normalizedRole);
+    }
 
     if (!mongoose.Types.ObjectId.isValid(req.user.id)) {
       return res.status(400).json({
@@ -111,31 +280,43 @@ const fetchEntries = async (req, res) => {
       });
     }
 
-    // Determine cache key based on role
-    const cacheKey = (normalizedRole === "Admin" || normalizedRole === "Superadmin") 
-      ? "entries_all" 
-      : `entries_user_${req.user.id}`;
+    // Pagination parameters
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const skip = (page - 1) * limit;
 
-    // Check cache first
-    const cachedData = getCachedData(cacheKey);
-    if (cachedData) {
-      console.log("fetchEntries: Returning cached data for key:", cacheKey);
-      return res.status(200).json({
-        success: true,
-        data: cachedData,
-        cached: true
-      });
+    // REAL-TIME: No caching for entries to ensure filters and pagination work correctly
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📊 REAL-TIME: Fetching entries directly from DB (no cache)");
     }
 
-    // Cache miss - query MongoDB
-    let entries;
-    if (normalizedRole === "Admin" || normalizedRole === "Superadmin") {
-      entries = await Entry.find().populate("createdBy", "username _id").lean();
-    } else {
-      entries = await Entry.find({ createdBy: req.user.id })
+    // Build filter from query parameters
+    let filter = buildFilter(req, normalizedRole);
+
+    // Handle createdBy filter (username lookup)
+    let createdByUserId = null;
+    if (req.query.selectedCreatedBy && (normalizedRole === "Admin" || normalizedRole === "Superadmin")) {
+      const User = require("../Schema/Model");
+      const user = await User.findOne({ username: req.query.selectedCreatedBy }).lean();
+      if (user) {
+        createdByUserId = user._id;
+        filter.createdBy = createdByUserId;
+      }
+    }
+
+    // Sort options
+    const sortOptions = { createdAt: -1 };
+
+    // Execute query with pagination
+    const [entries, total] = await Promise.all([
+      Entry.find(filter)
         .populate("createdBy", "username _id")
-        .lean();
-    }
+        .sort(sortOptions)
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Entry.countDocuments(filter),
+    ]);
 
     // Normalize entries (convert ObjectIds to strings)
     const normalizedEntries = entries.map((entry) => ({
@@ -147,16 +328,28 @@ const fetchEntries = async (req, res) => {
       },
     }));
 
-    // Set cache with 300 second TTL
-    setcache(cacheKey, normalizedEntries, 300);
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📊 REAL-TIME: Fetched entries:", normalizedEntries.length, "of", total);
+    }
 
-    console.log("Fetched entries count:", normalizedEntries.length);
-
-    res.status(200).json({
+    const result = {
       success: true,
       data: normalizedEntries,
-      cached: false
-    });
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit),
+        hasMore: skip + entries.length < total,
+      },
+    };
+    
+    // NO CACHING - Real-time data for perfect filter and pagination behavior
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📊 REAL-TIME: Returning fresh data (no caching)");
+    }
+
+    res.status(200).json(result);
   } catch (error) {
     console.error("Error fetching entries:", error.message);
     res.status(500).json({
@@ -264,8 +457,10 @@ const editEntry = async (req, res) => {
       runValidators: true,
     }).lean();
 
-    // Clear all cache on data mutation
-    clearAllCache();
+    // REAL-TIME: No cache to invalidate - data is always fresh
+    if (process.env.NODE_ENV === 'development') {
+      console.log("🔄 REAL-TIME: Entry updated - no cache invalidation needed");
+    }
 
     res.status(200).json({
       success: true,
@@ -322,8 +517,10 @@ const DeleteData = async (req, res) => {
 
     await Entry.findByIdAndDelete(req.params.id);
 
-    // Clear all cache on data mutation
-    clearAllCache();
+    // REAL-TIME: No cache to invalidate - data is always fresh
+    if (process.env.NODE_ENV === 'development') {
+      console.log("🔄 REAL-TIME: Entry deleted - no cache invalidation needed");
+    }
 
     res.status(200).json({
       success: true,
@@ -399,9 +596,9 @@ const bulkUploadStocks = async (req, res) => {
       }
     }
 
-    // Clear all cache after bulk upload
-    if (insertedCount > 0) {
-      clearAllCache();
+    // REAL-TIME: No cache to invalidate - data is always fresh
+    if (insertedCount > 0 && process.env.NODE_ENV === 'development') {
+      console.log("🔄 REAL-TIME: Bulk upload completed - no cache invalidation needed");
     }
 
     // Return appropriate status
@@ -537,6 +734,257 @@ const getUsers = async (req, res) => {
       success: false,
       errorCode: "SERVER_ERROR",
       message: "We couldn't retrieve the user list right now.",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * fetchAllEntries - Fetch ALL entries with filters (for analytics, not paginated)
+ * This is used for analytics drawers that need full dataset
+ */
+const fetchAllEntries = async (req, res) => {
+  try {
+    const normalizedRole = req.user.role.charAt(0).toUpperCase() + req.user.role.slice(1).toLowerCase();
+    // Fetch all entries request logged without sensitive user data
+    if (process.env.NODE_ENV === 'development') {
+      console.log("fetchAllEntries: Role:", normalizedRole);
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(req.user.id)) {
+      return res.status(400).json({
+        success: false,
+        errorCode: "INVALID_USER_ID",
+        message: "The user ID provided in your session is invalid.",
+      });
+    }
+
+    // Build filter from query parameters (same as fetchEntries but no pagination)
+    let filter = buildFilter(req, normalizedRole);
+
+    // Handle createdBy filter (username lookup)
+    if (req.query.selectedCreatedBy && (normalizedRole === "Admin" || normalizedRole === "Superadmin")) {
+      const User = require("../Schema/Model");
+      const user = await User.findOne({ username: req.query.selectedCreatedBy }).lean();
+      if (user) {
+        filter.createdBy = user._id;
+      }
+    }
+
+    // Sort options
+    const sortOptions = { createdAt: -1 };
+
+    // Fetch ALL entries (no pagination)
+    const entries = await Entry.find(filter)
+      .populate("createdBy", "username _id")
+      .sort(sortOptions)
+      .lean();
+
+    // Normalize entries (convert ObjectIds to strings)
+    const normalizedEntries = entries.map((entry) => ({
+      ...entry,
+      _id: entry._id.toString(),
+      createdBy: {
+        _id: entry.createdBy?._id?.toString() || null,
+        username: entry.createdBy?.username || "Unknown",
+      },
+    }));
+
+    console.log("Fetched all entries count:", normalizedEntries.length);
+
+    res.status(200).json({
+      success: true,
+      data: normalizedEntries,
+      total: normalizedEntries.length,
+    });
+  } catch (error) {
+    console.error("Error fetching all entries:", error.message);
+    res.status(500).json({
+      success: false,
+      errorCode: "SERVER_ERROR",
+      message: "We couldn't retrieve entries at the moment. Please try again later.",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * getEntryCounts - Get counts for trackers (optimized count-only queries)
+ * This endpoint returns only counts, not full data, for performance
+ */
+const getEntryCounts = async (req, res) => {
+  try {
+    const normalizedRole = req.user.role.charAt(0).toUpperCase() + req.user.role.slice(1).toLowerCase();
+    
+    if (!mongoose.Types.ObjectId.isValid(req.user.id)) {
+      return res.status(400).json({
+        success: false,
+        errorCode: "INVALID_USER_ID",
+        message: "The user ID provided in your session is invalid.",
+      });
+    }
+
+    // REAL-TIME: No caching for entry counts to ensure dashboard statistics are always accurate
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📊 REAL-TIME: Calculating entry counts directly from DB (no cache)");
+    }
+
+    // Build base filter (same as fetchEntries but without pagination)
+    let filter = buildFilter(req, normalizedRole);
+
+    // Handle createdBy filter
+    if (req.query.selectedCreatedBy && (normalizedRole === "Admin" || normalizedRole === "Superadmin")) {
+      const User = require("../Schema/Model");
+      const user = await User.findOne({ username: req.query.selectedCreatedBy }).lean();
+      if (user) {
+        filter.createdBy = user._id;
+      }
+    }
+
+    // Get total count (all filtered entries)
+    const totalResults = await Entry.countDocuments(filter);
+
+    // Get leads count (status = "Not Found")
+    const leadsFilter = { ...filter, status: "Not Found" };
+    const totalLeads = await Entry.countDocuments(leadsFilter);
+
+    // Get monthly calls count using optimized aggregation (NO document fetch)
+    // Monthly calls = entries created this month + history entries for entries created/updated this month
+    const now = new Date();
+    const currentMonth = now.getMonth();
+    const currentYear = now.getFullYear();
+    
+    // Create monthly filter combining base filter with monthly date conditions
+    // Monthly filter should apply base filters AND monthly date condition
+    const monthlyDateCondition = {
+      $or: [
+        {
+          $expr: {
+            $and: [
+              { $eq: [{ $month: "$createdAt" }, currentMonth + 1] },
+              { $eq: [{ $year: "$createdAt" }, currentYear] },
+            ],
+          },
+        },
+        {
+          $expr: {
+            $and: [
+              { $eq: [{ $month: "$updatedAt" }, currentMonth + 1] },
+              { $eq: [{ $year: "$updatedAt" }, currentYear] },
+            ],
+          },
+        },
+      ],
+    };
+    
+    // Combine base filter with monthly date condition using $and
+    // This ensures base filters (search, organization, etc.) are applied AND monthly condition
+    const monthlyFilter = filter.$or || filter.$and
+      ? { $and: [filter, monthlyDateCondition] }
+      : { ...filter, ...monthlyDateCondition };
+    
+    // Use aggregation to count monthly calls WITHOUT fetching documents
+    // This is optimized to only return counts, not full documents
+    const monthlyCallsResult = await Entry.aggregate([
+      { $match: monthlyFilter },
+      {
+        $project: {
+          isCreatedThisMonth: {
+            $and: [
+              { $eq: [{ $month: "$createdAt" }, currentMonth + 1] },
+              { $eq: [{ $year: "$createdAt" }, currentYear] },
+            ],
+          },
+          isUpdatedThisMonth: {
+            $and: [
+              { $eq: [{ $month: "$updatedAt" }, currentMonth + 1] },
+              { $eq: [{ $year: "$updatedAt" }, currentYear] },
+            ],
+          },
+          historyCount: { $size: { $ifNull: ["$history", []] } },
+        },
+      },
+      {
+        $project: {
+          callCount: {
+            $add: [
+              { $cond: ["$isCreatedThisMonth", 1, 0] }, // Count entry if created this month
+              {
+                $cond: [
+                  { $or: ["$isCreatedThisMonth", "$isUpdatedThisMonth"] },
+                  "$historyCount",
+                  0,
+                ],
+              }, // Count history if created/updated this month
+            ],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalMonthlyCalls: { $sum: "$callCount" },
+        },
+      },
+    ]);
+    
+    const monthlyCalls = monthlyCallsResult[0]?.totalMonthlyCalls || 0;
+
+    // Get status-based counts
+    const statusCounts = await Entry.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const statusMap = {};
+    statusCounts.forEach((item) => {
+      statusMap[item._id] = item.count;
+    });
+
+    // Get close type counts
+    const closeTypeCounts = await Entry.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: "$closetype",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const closeTypeMap = {};
+    closeTypeCounts.forEach((item) => {
+      if (item._id) closeTypeMap[item._id] = item.count;
+    });
+
+    const result = {
+      success: true,
+      data: {
+        totalLeads,
+        totalResults,
+        monthlyCalls,
+        statusCounts: statusMap,
+        closeTypeCounts: closeTypeMap,
+      },
+    };
+    
+    // NO CACHING - Real-time data for accurate dashboard statistics
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📊 REAL-TIME: Returning fresh entry counts (no caching)");
+    }
+
+    res.status(200).json(result);
+  } catch (error) {
+    console.error("Error fetching entry counts:", error.message);
+    res.status(500).json({
+      success: false,
+      errorCode: "SERVER_ERROR",
+      message: "We couldn't retrieve entry counts at the moment. Please try again later.",
       error: error.message,
     });
   }
@@ -887,6 +1335,8 @@ module.exports = {
   sendQuotationEmail,
   DataentryLogic,
   fetchEntries,
+  fetchAllEntries,
+  getEntryCounts,
   DeleteData,
   editEntry,
   exportentry,

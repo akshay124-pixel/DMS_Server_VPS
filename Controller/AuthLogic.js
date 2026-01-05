@@ -5,6 +5,7 @@
 const User = require("../Schema/Model");
 const bcrypt = require("bcrypt");
 const { generateTokenPair, generateToken, verifyRefreshToken } = require("../utils/config jwt");
+const { getCachedData, setcache, smartInvalidate } = require("../Middleware/CacheMiddleware");
 
 /**
  * Signup Controller
@@ -98,11 +99,10 @@ const Login = async (req, res) => {
     user.refreshToken = tokens.refreshToken;
     await user.save();
 
-    console.log("Login: Tokens generated for user:", {
-      id: user._id,
-      email: user.email,
-      role: user.role
-    });
+    // Login tokens generated (sensitive data not logged)
+    if (process.env.NODE_ENV === 'development') {
+      console.log("Login: Tokens generated for user");
+    }
 
     return res.status(200).json({
       success: true,
@@ -167,7 +167,7 @@ const RefreshToken = async (req, res) => {
 
     // CRITICAL: Compare refresh token with DB (reuse detection)
     if (user.refreshToken !== refreshToken) {
-      console.log("RefreshToken: Token reuse detected for user:", user._id);
+      console.log("RefreshToken: Token reuse detected");
       // Potential token theft - invalidate all tokens
       user.refreshToken = null;
       await user.save();
@@ -180,7 +180,7 @@ const RefreshToken = async (req, res) => {
 
     // CRITICAL: Check token version (password change invalidation)
     if (user.tokenVersion !== verification.tokenVersion) {
-      console.log("RefreshToken: Token version mismatch for user:", user._id);
+      console.log("RefreshToken: Token version mismatch");
       return res.status(401).json({
         success: false,
         message: "Token has been invalidated due to password change. Please login again.",
@@ -195,10 +195,10 @@ const RefreshToken = async (req, res) => {
     user.refreshToken = tokens.refreshToken;
     await user.save();
 
-    console.log("RefreshToken: New tokens generated for user:", {
-      id: user._id,
-      email: user.email
-    });
+    // Refresh tokens generated (sensitive data not logged)
+    if (process.env.NODE_ENV === 'development') {
+      console.log("RefreshToken: New tokens generated");
+    }
 
     return res.status(200).json({
       success: true,
@@ -229,7 +229,10 @@ const Logout = async (req, res) => {
     // Set refresh token to null in DB
     await User.findByIdAndUpdate(userId, { refreshToken: null });
 
-    console.log("Logout: Refresh token cleared for user:", userId);
+    // Logout completed (user ID not logged for security)
+    if (process.env.NODE_ENV === 'development') {
+      console.log("Logout: Refresh token cleared");
+    }
 
     return res.status(200).json({
       success: true,
@@ -253,7 +256,10 @@ const ChangePassword = async (req, res) => {
     const { currentPassword, newPassword, email } = req.body;
     const userId = req.user.id;
 
-    console.log("ChangePassword: Request received", { userId, email });
+    // Change password request received (sensitive data not logged)
+    if (process.env.NODE_ENV === 'development') {
+      console.log("ChangePassword: Request received");
+    }
 
     // Validate all fields
     if (!currentPassword || !newPassword || !email) {
@@ -283,7 +289,7 @@ const ChangePassword = async (req, res) => {
     // Find user
     const user = await User.findById(userId);
     if (!user) {
-      console.log("ChangePassword: User not found", { userId });
+      console.log("ChangePassword: User not found");
       return res.status(404).json({ 
         success: false, 
         message: "User not found" 
@@ -292,10 +298,7 @@ const ChangePassword = async (req, res) => {
 
     // Verify email matches
     if (user.email !== email) {
-      console.log("ChangePassword: Email mismatch", {
-        providedEmail: email,
-        userEmail: user.email
-      });
+      console.log("ChangePassword: Email mismatch");
       return res.status(403).json({
         success: false,
         message: "Email does not match authenticated user"
@@ -305,7 +308,7 @@ const ChangePassword = async (req, res) => {
     // Verify current password
     const isMatch = await bcrypt.compare(currentPassword, user.password);
     if (!isMatch) {
-      console.log("ChangePassword: Current password incorrect for user", { userId });
+      console.log("ChangePassword: Current password incorrect");
       return res.status(401).json({ 
         success: false, 
         message: "Current password is incorrect" 
@@ -322,10 +325,17 @@ const ChangePassword = async (req, res) => {
     user.lastPasswordChange = new Date();
     await user.save();
 
-    console.log("ChangePassword: Password changed successfully for user", {
-      userId,
-      newTokenVersion: user.tokenVersion
-    });
+    // SMART CACHE: Clear user-specific cache after password change
+    smartInvalidate('users', userId);
+    smartInvalidate('calls', userId); // User's call cache may be affected
+    smartInvalidate('entries', userId); // User's entry cache may be affected
+    if (process.env.NODE_ENV === 'development') {
+      console.log("🧠 SMART CACHE: Invalidated user-specific cache after password change");
+    }
+
+    if (process.env.NODE_ENV === 'development') {
+      console.log("ChangePassword: Password changed successfully");
+    }
 
     res.status(200).json({
       success: true,
@@ -342,17 +352,39 @@ const ChangePassword = async (req, res) => {
 };
 
 /**
- * Get User Role Controller
+ * Get User Role Controller with caching
  */
 const getUserRole = async (req, res) => {
   try {
-    console.log("getUserRole: userId:", req.user.id, "role:", req.user.role);
-    return res.status(200).json({
+    const userId = req.user.id;
+    const cacheKey = `user_role_${userId}`;
+    
+    // Try to get from cache first
+    const cachedRole = getCachedData(cacheKey);
+    if (cachedRole) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log("👤 Cache HIT for user role");
+      }
+      return res.status(200).json(cachedRole);
+    }
+    
+    if (process.env.NODE_ENV === 'development') {
+      console.log("👤 Cache MISS for user role, fetching from DB");
+      console.log("getUserRole: role:", req.user.role);
+    }
+    
+    const result = {
       id: req.user.id,
       role: req.user.role,
       isAdmin: req.user.role === "Admin",
       isSuperadmin: req.user.role === "Superadmin"
-    });
+    };
+    
+    // Cache user role for 15 minutes (roles don't change often)
+    setcache(cacheKey, result, 900);
+    console.log("👤 Cached user role for 15 minutes:", cacheKey);
+    
+    return res.status(200).json(result);
   } catch (error) {
     console.error("getUserRole Error:", error.message);
     return res.status(500).json({

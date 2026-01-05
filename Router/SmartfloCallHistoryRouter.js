@@ -17,6 +17,12 @@ router.get("/stats", verifyToken, callHistoryController.getCallStats);
 // Debug: Get calls with recordings (temporary)
 router.get("/debug/recordings", verifyToken, callHistoryController.debugRecordings);
 
+// REAL-TIME: Manual cache refresh endpoint
+router.post("/refresh-cache", verifyToken, callHistoryController.refreshCache);
+
+// SMART: Cache monitoring and statistics
+router.get("/cache-stats", verifyToken, callHistoryController.getCacheMonitoring);
+
 // Export call history
 router.post("/export", verifyToken, callHistoryController.exportCallHistory);
 

@@ -76,6 +76,38 @@ const CallLogSchema = new mongoose.Schema({
     enum: ["outbound", "inbound"],
     default: "outbound",
     required: true,
+    index: true, // Add index for filtering
+  },
+  
+  // Virtual number used (CRITICAL for incoming calls)
+  virtualNumber: {
+    type: String,
+    trim: true,
+    index: true, // Index for virtual number analytics
+  },
+  
+  // Queue information for inbound calls
+  queueId: {
+    type: String,
+    trim: true,
+  },
+  
+  queueWaitTime: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
+  
+  // Agent assignment for inbound calls
+  assignedAt: {
+    type: Date,
+  },
+  
+  // Call routing information
+  routingReason: {
+    type: String,
+    enum: ["direct", "queue", "transfer", "callback", "ivr", "outbound"],
+    default: "direct",
   },
   
   // Timing information
@@ -114,6 +146,33 @@ const CallLogSchema = new mongoose.Schema({
     maxlength: 1000,
   },
   
+  // Call source tracking
+  source: {
+    type: String,
+    enum: ["SMARTFLO", "MANUAL", "WEBHOOK"],
+    default: "SMARTFLO",
+    required: true,
+  },
+  
+  // Call transfer tracking
+  transferData: {
+    transferredFrom: String,
+    transferredTo: String,
+    transferReason: String,
+    transferTime: Date,
+    transferType: {
+      type: String,
+      enum: ["blind", "attended", "warm"],
+    },
+  },
+  
+  // IVR interaction data
+  ivrData: {
+    menuSelections: [String],
+    dtmfInputs: [String],
+    ivrDuration: Number,
+  },
+  
   // Webhook event data (for debugging)
   webhookData: {
     type: mongoose.Schema.Types.Mixed,
@@ -141,6 +200,9 @@ CallLogSchema.pre("save", function (next) {
 CallLogSchema.index({ leadId: 1, createdAt: -1 });
 CallLogSchema.index({ userId: 1, createdAt: -1 });
 CallLogSchema.index({ callStatus: 1, createdAt: -1 });
+CallLogSchema.index({ callDirection: 1, createdAt: -1 }); // For direction filtering
+CallLogSchema.index({ virtualNumber: 1, createdAt: -1 }); // For virtual number analytics
+CallLogSchema.index({ providerCallId: 1 }); // For webhook updates (unique)
 
 const CallLog = mongoose.model("CallLog", CallLogSchema);
 

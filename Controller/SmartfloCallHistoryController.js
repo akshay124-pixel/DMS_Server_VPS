@@ -5,6 +5,7 @@ const User = require("../Schema/Model");
 const smartfloClient = require("../services/smartfloClient");
 const { Parser } = require("json2csv");
 const axios = require("axios");
+const { getCachedData, setcache, smartInvalidate, smartCacheRefresh } = require("../Middleware/CacheMiddleware");
 
 /**
  * Smartflo Call History Controller
@@ -28,6 +29,7 @@ exports.getCallHistory = async (req, res) => {
       endDate,
       agentNumber,
       destinationNumber,
+      virtualNumber, // NEW: Virtual number filter
       hasRecording,
       sortBy = "createdAt",
       sortOrder = "desc",
@@ -35,7 +37,26 @@ exports.getCallHistory = async (req, res) => {
 
     const currentUser = req.user;
     
-    console.log("📞 getCallHistory - User:", currentUser.id, "Role:", currentUser.role);
+    // Call history request logged without sensitive user data
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📞 getCallHistory - Role:", currentUser.role);
+    }
+    
+    // Create cache key based on all parameters
+    const cacheKey = `call_history_${currentUser.id}_${currentUser.role}_${page}_${limit}_${userId || 'all'}_${leadId || 'all'}_${status || 'all'}_${direction || 'all'}_${startDate || 'all'}_${endDate || 'all'}_${agentNumber || 'all'}_${destinationNumber || 'all'}_${virtualNumber || 'all'}_${hasRecording || 'all'}_${sortBy}_${sortOrder}`;
+    
+    // Try to get from cache first - only log in development
+    const cachedResult = getCachedData(cacheKey);
+    if (cachedResult) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log("📞 Cache HIT for call history");
+      }
+      return res.status(200).json(cachedResult);
+    }
+    
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📞 Cache MISS for call history, fetching from DB");
+    }
     
     // Build filter based on user role
     const filter = {};
@@ -43,11 +64,15 @@ exports.getCallHistory = async (req, res) => {
     // RBAC: Normal users can only see their own calls - Convert string ID to ObjectId
     if (currentUser.role !== "Admin" && currentUser.role !== "Superadmin") {
       filter.userId = mongoose.Types.ObjectId.createFromHexString(currentUser.id);
-      console.log("🔒 RBAC Filter Applied - userId:", filter.userId);
+      if (process.env.NODE_ENV === 'development') {
+        console.log("🔒 RBAC Filter Applied");
+      }
     } else if (userId) {
       // Admin can filter by specific user
       filter.userId = mongoose.Types.ObjectId.createFromHexString(userId);
-      console.log("👤 Admin Filter - userId:", filter.userId);
+      if (process.env.NODE_ENV === 'development') {
+        console.log("👤 Admin Filter Applied");
+      }
     }
     
     // Apply filters
@@ -56,6 +81,7 @@ exports.getCallHistory = async (req, res) => {
     if (direction) filter.callDirection = direction;
     if (agentNumber) filter.agentNumber = new RegExp(agentNumber, "i");
     if (destinationNumber) filter.destinationNumber = new RegExp(destinationNumber, "i");
+    if (virtualNumber) filter.virtualNumber = new RegExp(virtualNumber, "i"); // NEW: Virtual number filter
     
     // Date range filter
     if (startDate || endDate) {
@@ -106,7 +132,7 @@ exports.getCallHistory = async (req, res) => {
       })
     );
     
-    res.status(200).json({
+    const result = {
       success: true,
       data: callsWithRecordings,
       pagination: {
@@ -116,7 +142,15 @@ exports.getCallHistory = async (req, res) => {
         pages: Math.ceil(total / parseInt(limit)),
         hasMore: skip + calls.length < total,
       },
-    });
+    };
+    
+    // Cache the result for 30 seconds (real-time requirement with performance boost)
+    setcache(cacheKey, result, 30);
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📞 Cached call history result for 30 seconds");
+    }
+    
+    res.status(200).json(result);
   } catch (error) {
     console.error("Get call history error:", error);
     res.status(500).json({
@@ -135,6 +169,22 @@ exports.getCallDetails = async (req, res) => {
   try {
     const { id } = req.params;
     const currentUser = req.user;
+    
+    // Create cache key for individual call details
+    const cacheKey = `call_details_${id}_${currentUser.id}`;
+    
+    // Try to get from cache first
+    const cachedCall = getCachedData(cacheKey);
+    if (cachedCall) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log("📞 Cache HIT for call details");
+      }
+      return res.status(200).json(cachedCall);
+    }
+    
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📞 Cache MISS for call details, fetching from DB");
+    }
     
     const call = await CallLog.findById(id)
       .populate("leadId")
@@ -166,10 +216,16 @@ exports.getCallDetails = async (req, res) => {
       call.recording = recording;
     }
     
-    res.status(200).json({
+    const result = {
       success: true,
       data: call,
-    });
+    };
+    
+    // Cache call details for 10 minutes (individual calls don't change often)
+    setcache(cacheKey, result, 600);
+    console.log("📞 Cached call details for 10 minutes:", cacheKey);
+    
+    res.status(200).json(result);
   } catch (error) {
     console.error("Get call details error:", error);
     res.status(500).json({
@@ -257,7 +313,10 @@ exports.streamRecording = async (req, res) => {
         },
       });
       
-      console.log("🎵 Original response headers:", response.headers);
+      // Response headers logged only in development
+      if (process.env.NODE_ENV === 'development') {
+        console.log("🎵 Original response headers:", response.headers);
+      }
       
       // Determine content type
       let contentType = response.headers["content-type"] || "audio/mpeg";
@@ -500,7 +559,10 @@ exports.exportCallHistory = async (req, res) => {
     
     const currentUser = req.user;
     
-    console.log("📥 exportCallHistory - User:", currentUser.id, "Role:", currentUser.role);
+    // Export call history request logged without sensitive user data
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📥 exportCallHistory - Role:", currentUser.role);
+    }
     
     // Build filter
     const filter = {};
@@ -597,7 +659,26 @@ exports.getCallStats = async (req, res) => {
     const { startDate, endDate, userId } = req.query;
     const currentUser = req.user;
     
-    console.log("📊 getCallStats - User:", currentUser.id, "Role:", currentUser.role);
+    // Get call stats request logged without sensitive user data
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📊 getCallStats - Role:", currentUser.role);
+    }
+    
+    // Create cache key for stats
+    const cacheKey = `call_stats_${currentUser.id}_${currentUser.role}_${userId || 'all'}_${startDate || 'all'}_${endDate || 'all'}`;
+    
+    // Try to get from cache first
+    const cachedStats = getCachedData(cacheKey);
+    if (cachedStats) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log("📊 Cache HIT for call stats");
+      }
+      return res.status(200).json(cachedStats);
+    }
+    
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📊 Cache MISS for call stats, calculating from DB");
+    }
     
     // Build filter
     const filter = {};
@@ -605,10 +686,14 @@ exports.getCallStats = async (req, res) => {
     // RBAC - Convert string ID to ObjectId
     if (currentUser.role !== "Admin" && currentUser.role !== "Superadmin") {
       filter.userId = mongoose.Types.ObjectId.createFromHexString(currentUser.id);
-      console.log("🔒 RBAC Filter Applied - userId:", filter.userId);
+      if (process.env.NODE_ENV === 'development') {
+        console.log("🔒 RBAC Filter Applied");
+      }
     } else if (userId) {
       filter.userId = mongoose.Types.ObjectId.createFromHexString(userId);
-      console.log("👤 Admin Filter - userId:", filter.userId);
+      if (process.env.NODE_ENV === 'development') {
+        console.log("👤 Admin Filter Applied");
+      }
     }
     
     // Date range
@@ -622,7 +707,7 @@ exports.getCallStats = async (req, res) => {
       }
     }
     
-    // Aggregate statistics
+    // Enhanced aggregate statistics with direction breakdown
     const stats = await CallLog.aggregate([
       { $match: filter },
       {
@@ -641,6 +726,37 @@ exports.getCallStats = async (req, res) => {
           noAnswerCalls: {
             $sum: { $cond: [{ $eq: ["$callStatus", "no_answer"] }, 1, 0] },
           },
+          // NEW: Direction-based statistics
+          inboundCalls: {
+            $sum: { $cond: [{ $eq: ["$callDirection", "inbound"] }, 1, 0] },
+          },
+          outboundCalls: {
+            $sum: { $cond: [{ $eq: ["$callDirection", "outbound"] }, 1, 0] },
+          },
+          inboundCompleted: {
+            $sum: { 
+              $cond: [
+                { $and: [
+                  { $eq: ["$callDirection", "inbound"] },
+                  { $eq: ["$callStatus", "completed"] }
+                ]}, 
+                1, 
+                0
+              ] 
+            },
+          },
+          outboundCompleted: {
+            $sum: { 
+              $cond: [
+                { $and: [
+                  { $eq: ["$callDirection", "outbound"] },
+                  { $eq: ["$callStatus", "completed"] }
+                ]}, 
+                1, 
+                0
+              ] 
+            },
+          },
           totalDuration: { $sum: "$duration" },
           avgDuration: { $avg: "$duration" },
           callsWithRecording: {
@@ -652,6 +768,8 @@ exports.getCallStats = async (req, res) => {
               ],
             },
           },
+          // NEW: Virtual number usage statistics
+          uniqueVirtualNumbers: { $addToSet: "$virtualNumber" },
         },
       },
     ]);
@@ -662,25 +780,61 @@ exports.getCallStats = async (req, res) => {
       answeredCalls: 0,
       failedCalls: 0,
       noAnswerCalls: 0,
+      inboundCalls: 0,
+      outboundCalls: 0,
+      inboundCompleted: 0,
+      outboundCompleted: 0,
       totalDuration: 0,
       avgDuration: 0,
       callsWithRecording: 0,
+      uniqueVirtualNumbers: [],
     };
     
-    // Calculate rates
+    // Enhanced rate calculations
+    const successfulCalls = result.completedCalls + result.answeredCalls;
     result.completionRate =
       result.totalCalls > 0
-        ? ((result.completedCalls / result.totalCalls) * 100).toFixed(2)
+        ? parseFloat(((successfulCalls / result.totalCalls) * 100).toFixed(2))
         : 0;
     result.answerRate =
       result.totalCalls > 0
-        ? ((result.answeredCalls / result.totalCalls) * 100).toFixed(2)
+        ? parseFloat(((result.answeredCalls / result.totalCalls) * 100).toFixed(2))
         : 0;
     
-    res.status(200).json({
+    // NEW: Direction-specific rates
+    result.inboundCompletionRate =
+      result.inboundCalls > 0
+        ? parseFloat(((result.inboundCompleted / result.inboundCalls) * 100).toFixed(2))
+        : 0;
+    result.outboundCompletionRate =
+      result.outboundCalls > 0
+        ? parseFloat(((result.outboundCompleted / result.outboundCalls) * 100).toFixed(2))
+        : 0;
+    
+    // NEW: Virtual number count
+    result.virtualNumbersUsed = result.uniqueVirtualNumbers.filter(num => num).length;
+    
+    console.log("📊 Final stats result:", {
+      totalCalls: result.totalCalls,
+      completedCalls: result.completedCalls,
+      answeredCalls: result.answeredCalls,
+      inboundCalls: result.inboundCalls,
+      outboundCalls: result.outboundCalls,
+      completionRate: result.completionRate
+    });
+    
+    const response = {
       success: true,
       data: result,
-    });
+    };
+    
+    // Cache stats for 1 minute (real-time stats with performance boost)
+    setcache(cacheKey, response, 60);
+    if (process.env.NODE_ENV === 'development') {
+      console.log("📊 Cached call stats for 1 minute");
+    }
+    
+    res.status(200).json(response);
   } catch (error) {
     console.error("Get call stats error:", error);
     res.status(500).json({
@@ -727,6 +881,84 @@ exports.debugRecordings = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch debug recordings",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * SMART: Force cache refresh endpoint with intelligent invalidation
+ * POST /api/calls/refresh-cache
+ */
+exports.refreshCache = async (req, res) => {
+  try {
+    const currentUser = req.user;
+    const { dataType = 'calls', userId } = req.body;
+    
+    // Smart invalidation based on data type
+    const targetUserId = userId || currentUser.id;
+    smartInvalidate(dataType, targetUserId);
+    
+    console.log("🧠 SMART REFRESH: Targeted cache refresh triggered", {
+      dataType,
+      userId: targetUserId,
+      triggeredBy: currentUser.username || currentUser.id
+    });
+    
+    res.status(200).json({
+      success: true,
+      message: `${dataType} cache refreshed successfully - next requests will fetch fresh data`,
+      refreshedAt: new Date().toISOString(),
+      refreshedBy: currentUser.username || currentUser.id,
+      dataType,
+      targetUserId
+    });
+  } catch (error) {
+    console.error("Smart cache refresh error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to refresh cache",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * SMART: Get cache statistics and monitoring
+ * GET /api/calls/cache-stats
+ */
+exports.getCacheMonitoring = async (req, res) => {
+  try {
+    const { getCacheStats } = require("../Middleware/CacheMiddleware");
+    const cache = require("../utils/Cache");
+    
+    const stats = getCacheStats();
+    const allKeys = cache.keys();
+    
+    // Categorize cache keys
+    const keyCategories = {
+      calls: allKeys.filter(key => key.includes('call_')).length,
+      entries: allKeys.filter(key => key.includes('entries_')).length,
+      users: allKeys.filter(key => key.includes('user_')).length,
+      other: allKeys.filter(key => !key.includes('call_') && !key.includes('entries_') && !key.includes('user_')).length
+    };
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        ...stats,
+        totalKeys: allKeys.length,
+        keyCategories,
+        hitRate: stats.hits > 0 ? ((stats.hits / (stats.hits + stats.misses)) * 100).toFixed(2) + '%' : '0%',
+        cacheHealth: allKeys.length > 0 ? 'Active' : 'Empty',
+        lastUpdated: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error("Cache monitoring error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to get cache statistics",
       error: error.message,
     });
   }

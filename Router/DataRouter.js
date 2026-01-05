@@ -5,6 +5,8 @@ const router = express.Router();
 
 router.post("/entry", verifyToken, DataLogic.DataentryLogic);
 router.get("/fetch-entry", verifyToken, DataLogic.fetchEntries);
+router.get("/fetch-all-entries", verifyToken, DataLogic.fetchAllEntries);
+router.get("/entry-counts", verifyToken, DataLogic.getEntryCounts);
 router.delete("/entry/:id", verifyToken, DataLogic.DeleteData);
 router.put("/editentry/:id", verifyToken, DataLogic.editEntry);
 router.get("/export", verifyToken, DataLogic.exportentry);
@@ -13,4 +15,5 @@ router.get("/user-role", verifyToken, DataLogic.getAdmin);
 router.get("/users", verifyToken, DataLogic.getUsers);
 router.post("/send-email", verifyToken, DataLogic.sendEntryEmail);
 router.post("/send-quotation", verifyToken, DataLogic.sendQuotationEmail);
+
 module.exports = router;

@@ -60,19 +60,24 @@ exports.clickToCall = async (req, res) => {
       customIdentifier,
     });
     const callResponse = await smartfloClient.clickToCall(payload);
-    console.log("ClickToCall response", callResponse);
+    if (process.env.NODE_ENV === 'development') {
+      console.log("ClickToCall response", callResponse);
+    }
 
-    // 4) Call log save
+    // 4) Enhanced call log save with virtual number tracking
     const callLog = new CallLog({
       leadId: lead._id,
       userId: user._id,
       agentNumber: user.smartfloAgentNumber,
       destinationNumber: lead.mobileNumber,
       callerId: callerId, // ✅ Dynamic caller ID save होगी
+      virtualNumber: user.smartfloAgentNumber, // ✅ Track virtual number used
       providerCallId: callResponse.call_id || callResponse.id,
       customIdentifier,
       callStatus: "initiated",
       callDirection: "outbound",
+      source: "SMARTFLO",
+      routingReason: "outbound",
     });
 
     await callLog.save();

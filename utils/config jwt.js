@@ -28,12 +28,14 @@ function generateToken(user) {
     type: "access"
   };
 
-  console.log("generateToken: Generating access token for user:", {
-    id: payload.id,
-    email: payload.email,
-    role: payload.role,
-    tokenVersion: payload.tokenVersion
-  });
+  // Token generation logged without sensitive data
+  if (process.env.NODE_ENV === 'development') {
+    console.log("generateToken: Generating access token for user:", {
+      id: payload.id,
+      role: payload.role,
+      tokenVersion: payload.tokenVersion
+    });
+  }
 
   return jwt.sign(payload, ACCESS_TOKEN_SECRET, {
     expiresIn: ACCESS_TOKEN_EXPIRY
@@ -53,10 +55,13 @@ function generateRefreshToken(user) {
     type: "refresh"
   };
 
-  console.log("generateRefreshToken: Generating refresh token for user:", {
-    id: payload.id,
-    tokenVersion: payload.tokenVersion
-  });
+  // Token generation logged without sensitive data
+  if (process.env.NODE_ENV === 'development') {
+    console.log("generateRefreshToken: Generating refresh token for user:", {
+      id: payload.id,
+      tokenVersion: payload.tokenVersion
+    });
+  }
 
   return jwt.sign(payload, REFRESH_TOKEN_SECRET, {
     expiresIn: REFRESH_TOKEN_EXPIRY
@@ -204,7 +209,7 @@ const requireRole = (...allowedRoles) => {
     }
 
     if (!allowedRoles.includes(req.user.role)) {
-      console.log(`requireRole: User ${req.user.email} lacks required role. Has: ${req.user.role}, Needs: ${allowedRoles.join(" or ")}`);
+      console.log(`requireRole: User lacks required role. Has: ${req.user.role}, Needs: ${allowedRoles.join(" or ")}`);
       return res.status(403).json({
         success: false,
         message: "You don't have permission to access this resource",

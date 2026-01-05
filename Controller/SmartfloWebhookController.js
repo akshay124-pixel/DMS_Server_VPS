@@ -1,37 +1,48 @@
+/**
+ * Enhanced Smartflo Webhook Controller
+ * Handles ALL call events with complete virtual number tracking
+ * Supports both incoming and outgoing calls with unified call history
+ */
+
 const CallLog = require("../Schema/CallLogModel");
 const Entry = require("../Schema/DataModel");
-
-/**
- * Smartflo Webhook Controller
- * Handles incoming webhooks from Smartflo for call events
- * Configure webhook URL in Smartflo portal: https://your-domain.com/api/webhooks/smartflo/call-events
- */
+const User = require("../Schema/Model");
+const crypto = require("crypto");
+const { smartInvalidate } = require("../Middleware/CacheMiddleware");
 
 /**
  * Handle call event webhooks from Smartflo
  * POST /api/webhooks/smartflo/call-events
  * 
- * Smartflo sends events like:
- * - call.initiated
- * - call.ringing
- * - call.answered
- * - call.completed
- * - call.failed
- * - call.no_answer
+ * Enhanced to handle:
+ * - Virtual number tracking
+ * - Incoming call routing
+ * - Agent assignment
+ * - Queue management
+ * - Call transfers
  */
 exports.handleCallEvents = async (req, res) => {
   try {
     const webhookData = req.body;
     
-    console.log("Smartflo webhook received:", JSON.stringify(webhookData, null, 2));
+    console.log("📱 OUTBOUND WEBHOOK: Processing call event", {
+      event_type: webhookData.event_type,
+      call_status: webhookData.call_status,
+      direction: webhookData.direction,
+      timestamp: new Date().toISOString()
+    });
+    
+    // SECURITY: Verify outbound webhook signature
+    const signature = req.headers['x-smartflo-signature'] || req.headers['x-smartflo-secret'];
+    if (process.env.SMARTFLO_OUTBOUND_WEBHOOK_SECRET && signature) {
+      if (!verifyOutboundWebhookSignature(signature, webhookData)) {
+        console.log("❌ OUTBOUND WEBHOOK: Invalid signature");
+        return res.status(401).json({ success: false, message: 'Invalid outbound webhook signature' });
+      }
+      console.log("✅ OUTBOUND WEBHOOK: Signature verified");
+    }
 
-    // Verify webhook authenticity (optional - implement signature verification)
-    // const signature = req.headers['x-smartflo-signature'];
-    // if (!verifyWebhookSignature(signature, webhookData)) {
-    //   return res.status(401).json({ message: "Invalid webhook signature" });
-    // }
-
-    // Extract call details from webhook
+    // Enhanced webhook data extraction
     const {
       call_id,
       custom_identifier,
@@ -40,50 +51,175 @@ exports.handleCallEvents = async (req, res) => {
       agent_number,
       destination_number,
       caller_id,
+      virtual_number, // CRITICAL: Virtual number used
+      called_number,  // Alternative field name
       start_time,
       end_time,
       duration,
       recording_url,
       disposition,
       direction,
+      queue_id,
+      queue_wait_time,
+      transfer_data,
+      ivr_data,
+      // Additional fields that might indicate inbound
+      call_direction,
+      call_type,
+      inbound,
     } = webhookData;
 
-    // Find call log by provider call ID or custom identifier
-    let callLog = await CallLog.findOne({
-      $or: [
-        { providerCallId: call_id },
-        { customIdentifier: custom_identifier },
-      ],
-    });
+    // Determine virtual number from multiple possible fields
+    const virtualNum = virtual_number || called_number || agent_number;
+    
+    // ENHANCED INBOUND DETECTION - Check multiple possible indicators
+    const isInbound = 
+      direction === "inbound" || direction === "INBOUND" || direction === "Inbound" ||
+      call_direction === "inbound" || call_direction === "INBOUND" || call_direction === "Inbound" ||
+      call_type === "inbound" || call_type === "INBOUND" || call_type === "Inbound" ||
+      event_type?.toLowerCase().includes('inbound') ||
+      inbound === true || inbound === "true" ||
+      // CRITICAL: If webhook is configured for inbound and we have caller_id, assume inbound
+      (caller_id && called_number && !custom_identifier) ||
+      // If virtual number is called_number and we have caller_id, it's inbound
+      (caller_id && called_number && virtual_number === called_number) ||
+      // NEW: Additional detection for Smartflo India format
+      (caller_id && !custom_identifier && virtualNum) ||
+      // NEW: If we have caller_id but no outbound custom_identifier, it's likely inbound
+      (caller_id && !custom_identifier && event_type !== "call.initiated");
+    
+    // If no call_id, generate one for tracking
+    const callId = call_id || `WEBHOOK_${Date.now()}`;
+    
+    // Find existing call log by provider call ID or custom identifier
+    let callLog = null;
+    
+    // First try to find by provider call ID (most specific)
+    if (callId) {
+      callLog = await CallLog.findOne({ providerCallId: callId });
+    }
+    
+    // If not found and we have custom identifier, try that (for outbound calls)
+    if (!callLog && custom_identifier) {
+      callLog = await CallLog.findOne({ customIdentifier: custom_identifier });
+    }
+
+    // CRITICAL: For inbound calls, phone to match is caller_id
+    // For outbound calls, phone to match is destination_number
+    const phoneToMatch = isInbound ? 
+      (caller_id || webhookData.caller_id_number || destination_number || webhookData.call_to_number) : 
+      (destination_number || webhookData.call_to_number);
+
+    // Determine user/agent for the call early (needed for lead creation)
+    let assignedUser = null;
+    
+    if (isInbound) {
+      // For incoming calls, try to find agent by agent_number
+      if (agent_number) {
+        assignedUser = await User.findOne({ smartfloAgentNumber: agent_number });
+      }
+    } else {
+      // For outbound calls, find user by agent number or custom identifier
+      if (agent_number) {
+        assignedUser = await User.findOne({ smartfloAgentNumber: agent_number });
+      }
+      if (!assignedUser && custom_identifier) {
+        // Extract user ID from custom identifier if format is CRM_leadId_userId_timestamp
+        const parts = custom_identifier.split('_');
+        if (parts.length >= 3) {
+          assignedUser = await User.findById(parts[2]);
+        }
+      }
+    }
 
     if (!callLog) {
-      // If call log doesn't exist (e.g., inbound call), create new one
-      console.log("Creating new call log from webhook");
+      // Find lead by phone number (caller for inbound, destination for outbound)
+      let lead = await Entry.findOne({ mobileNumber: phoneToMatch });
       
-      // Try to find lead by phone number
-      const lead = await Entry.findOne({ mobileNumber: destination_number });
+      // For incoming calls from unknown numbers, create a placeholder lead
+      if (!lead && isInbound && phoneToMatch) {
+        lead = await createLeadForInboundCall(phoneToMatch, assignedUser);
+      }
+      
+      // CRITICAL: For inbound calls, if no lead found, still create one
+      if (!lead && isInbound && phoneToMatch) {
+        lead = await createLeadForInboundCall(phoneToMatch, assignedUser);
+      }
       
       if (!lead) {
-        console.warn("No lead found for destination number:", destination_number);
-        return res.status(200).json({ message: "Webhook received but no matching lead" });
+        // For inbound calls without phone number, still log the call
+        if (isInbound) {
+          lead = await createLeadForInboundCall(phoneToMatch || "Unknown", assignedUser);
+        } else {
+          return res.status(200).json({ 
+            success: true, 
+            message: "Webhook received but no matching lead",
+            action: "ignored"
+          });
+        }
       }
 
+      // Complete user assignment for inbound calls
+      if (isInbound) {
+        // Try to find agent by lead creator if not already assigned
+        if (!assignedUser && lead.createdBy) {
+          assignedUser = await User.findById(lead.createdBy);
+        }
+        // If still no user, assign to first available admin
+        if (!assignedUser) {
+          assignedUser = await User.findOne({ role: { $in: ["Admin", "Superadmin"] } });
+        }
+      }
+
+      if (!assignedUser) {
+        assignedUser = await User.findOne({ role: { $in: ["Admin", "Superadmin"] } });
+      }
+
+      // Create comprehensive call log
       callLog = new CallLog({
         leadId: lead._id,
-        userId: lead.createdBy, // Default to lead creator
-        agentNumber: agent_number,
-        destinationNumber: destination_number,
+        userId: assignedUser ? assignedUser._id : null,
+        agentNumber: agent_number || virtualNum,
+        destinationNumber: isInbound ? (caller_id || destination_number) : destination_number,
         callerId: caller_id,
-        providerCallId: call_id,
+        virtualNumber: virtualNum, // CRITICAL: Store virtual number
+        providerCallId: callId,
         customIdentifier: custom_identifier,
         callStatus: mapSmartfloStatus(call_status || event_type),
-        callDirection: direction || "inbound",
+        callDirection: isInbound ? "inbound" : "outbound", // CRITICAL: Set correct direction
+        queueId: queue_id,
+        queueWaitTime: queue_wait_time ? parseInt(queue_wait_time) : 0,
+        assignedAt: isInbound ? new Date() : null,
+        routingReason: isInbound ? (queue_id ? "queue" : "direct") : "direct",
+        source: "WEBHOOK",
         webhookData,
       });
+
+      // Update lead creator if it was an unknown caller
+      if (lead.createdBy === null && assignedUser) {
+        lead.createdBy = assignedUser._id;
+        await lead.save();
+      }
     } else {
       // Update existing call log
       callLog.callStatus = mapSmartfloStatus(call_status || event_type);
-      callLog.webhookData = webhookData;
+      callLog.webhookData = { ...callLog.webhookData, ...webhookData };
+      
+      // Update virtual number if not set
+      if (!callLog.virtualNumber && virtualNum) {
+        callLog.virtualNumber = virtualNum;
+      }
+      
+      // Update queue information
+      if (queue_id && !callLog.queueId) {
+        callLog.queueId = queue_id;
+        callLog.queueWaitTime = queue_wait_time ? parseInt(queue_wait_time) : 0;
+      }
+      
+      // CRITICAL: Update direction if it was wrong initially
+      if (isInbound && callLog.callDirection !== "inbound") {
+        callLog.callDirection = "inbound";
+      }
     }
 
     // Update timing information
@@ -107,30 +243,67 @@ exports.handleCallEvents = async (req, res) => {
       callLog.disposition = disposition;
     }
 
-    await callLog.save();
+    // Handle transfer data
+    if (transfer_data) {
+      callLog.transferData = {
+        transferredFrom: transfer_data.from_agent,
+        transferredTo: transfer_data.to_agent,
+        transferReason: transfer_data.reason,
+        transferTime: transfer_data.time ? new Date(transfer_data.time) : new Date(),
+        transferType: transfer_data.type || "warm",
+      };
+    }
 
-    // Update lead information
+    // Handle IVR data
+    if (ivr_data) {
+      callLog.ivrData = {
+        menuSelections: ivr_data.menu_selections || [],
+        dtmfInputs: ivr_data.dtmf_inputs || [],
+        ivrDuration: ivr_data.duration ? parseInt(ivr_data.duration) : 0,
+      };
+    }
+
+    await callLog.save();
+    
+    // SMART CACHE: Invalidate only call-related cache and refresh
+    smartInvalidate('calls', callLog.userId?.toString());
+    if (process.env.NODE_ENV === 'development') {
+      console.log("🧠 SMART CACHE: Invalidated call cache for user");
+    }
+
+    // Enhanced lead update logic
     if (callLog.leadId) {
       const lead = await Entry.findById(callLog.leadId);
       if (lead) {
         lead.lastCallDate = new Date();
         lead.lastCallStatus = callLog.callStatus;
         
-        // Update lead status based on call outcome
-        if (callLog.callStatus === "completed" && callLog.duration > 30) {
-          // Call was answered and lasted more than 30 seconds
-          if (lead.status === "Not Found") {
-            lead.status = "Interested"; // Or map based on disposition
+        // Intelligent lead status updates based on call outcome
+        if (callLog.callStatus === "completed") {
+          if (callLog.duration > 60) {
+            // Meaningful conversation
+            if (lead.status === "Not Found") {
+              lead.status = "Interested";
+            }
+          } else if (callLog.duration > 10) {
+            // Brief conversation
+            if (lead.status === "Not Found") {
+              lead.status = "Maybe";
+            }
           }
         } else if (callLog.callStatus === "no_answer" || callLog.callStatus === "failed") {
-          // Schedule follow-up
+          // Schedule automatic follow-up
           if (!lead.callbackScheduled) {
-            const tomorrow = new Date();
-            tomorrow.setDate(tomorrow.getDate() + 1);
-            lead.callbackScheduled = tomorrow;
-            lead.callbackReason = "Follow-up after no answer";
+            const followUpDate = new Date();
+            followUpDate.setHours(followUpDate.getHours() + 24); // 24 hours later
+            lead.callbackScheduled = followUpDate;
+            lead.callbackReason = `Follow-up after ${callLog.callStatus}`;
           }
         }
+
+        // Track call frequency
+        if (!lead.totalCallsMade) lead.totalCallsMade = 0;
+        lead.totalCallsMade += 1;
 
         await lead.save();
       }
@@ -141,10 +314,11 @@ exports.handleCallEvents = async (req, res) => {
       success: true,
       message: "Webhook processed successfully",
       callLogId: callLog._id,
+      direction: callLog.callDirection,
+      virtualNumber: callLog.virtualNumber,
+      leadId: callLog.leadId,
     });
   } catch (error) {
-    console.error("Webhook processing error:", error);
-    
     // Still return 200 to prevent Smartflo from retrying
     res.status(200).json({
       success: false,
@@ -155,65 +329,152 @@ exports.handleCallEvents = async (req, res) => {
 };
 
 /**
- * Handle inbound call webhooks
+ * Enhanced inbound call webhook handler
  * POST /api/webhooks/smartflo/inbound
+ * 
+ * Handles:
+ * - Virtual number identification
+ * - Unknown caller management
+ * - Agent assignment
+ * - Lead creation for new callers
  */
 exports.handleInboundCall = async (req, res) => {
   try {
     const webhookData = req.body;
     
-    console.log("Inbound call webhook received:", JSON.stringify(webhookData, null, 2));
+    // SECURITY: Verify inbound webhook signature
+    const signature = req.headers['x-smartflo-signature'] || req.headers['x-smartflo-secret'];
+    if (process.env.SMARTFLO_INBOUND_WEBHOOK_SECRET && signature) {
+      if (!verifyInboundWebhookSignature(signature, webhookData)) {
+        console.log("❌ INBOUND WEBHOOK: Invalid signature");
+        return res.status(401).json({ success: false, message: 'Invalid inbound webhook signature' });
+      }
+      console.log("✅ INBOUND WEBHOOK: Signature verified");
+    }
+
+    console.log("📞 INBOUND WEBHOOK: Processing inbound call", {
+      call_id: webhookData.call_id,
+      caller_number: webhookData.caller_number,
+      called_number: webhookData.called_number,
+      virtual_number: webhookData.virtual_number,
+      timestamp: new Date().toISOString()
+    });
 
     const {
       call_id,
       caller_number,
-      called_number,
+      called_number, // This is the virtual number
+      virtual_number,
       call_status,
       start_time,
+      agent_number,
+      queue_id,
+      queue_wait_time,
     } = webhookData;
 
-    // Find lead by caller number
-    const lead = await Entry.findOne({ mobileNumber: caller_number });
+    const virtualNum = virtual_number || called_number;
+    const callerNum = caller_number;
 
-    if (lead) {
-      // Create call log for inbound call
-      const callLog = new CallLog({
-        leadId: lead._id,
-        userId: lead.createdBy,
-        agentNumber: called_number,
-        destinationNumber: caller_number,
-        providerCallId: call_id,
-        callStatus: mapSmartfloStatus(call_status),
-        callDirection: "inbound",
-        startTime: start_time ? new Date(start_time) : new Date(),
-        webhookData,
+    // Find existing lead by caller number
+    let lead = await Entry.findOne({ mobileNumber: callerNum });
+    let isNewLead = false;
+
+    if (!lead) {
+      // Create new lead for unknown caller
+      lead = new Entry({
+        customerName: `Incoming Caller ${callerNum}`,
+        mobileNumber: callerNum,
+        status: "Not Found",
+        organization: "Unknown",
+        category: "Incoming Call",
+        address: "Unknown",
+        state: "Unknown", 
+        city: "Unknown",
+        source: "INCOMING_CALL",
+        createdBy: null, // Will be assigned when agent is determined
       });
-
-      await callLog.save();
-
-      // Update lead
-      lead.lastCallDate = new Date();
-      lead.lastCallStatus = "inbound_call";
-      await lead.save();
-
-      res.status(200).json({
-        success: true,
-        message: "Inbound call logged",
-        leadId: lead._id,
-        leadName: lead.contactName || lead.customerName,
-      });
-    } else {
-      // Unknown caller - could create new lead or just log
-      console.log("Inbound call from unknown number:", caller_number);
       
-      res.status(200).json({
-        success: true,
-        message: "Inbound call from unknown number",
-      });
+      await lead.save();
+      isNewLead = true;
     }
-  } catch (error) {
-    console.error("Inbound webhook error:", error);
+
+    // Determine assigned agent
+    let assignedUser = null;
     
+    if (agent_number) {
+      assignedUser = await User.findOne({ smartfloAgentNumber: agent_number });
+    }
+    
+    // If no specific agent, assign to lead creator or first available admin
+    if (!assignedUser) {
+      if (lead.createdBy) {
+        assignedUser = await User.findById(lead.createdBy);
+      } else {
+        assignedUser = await User.findOne({ role: { $in: ["Admin", "Superadmin"] } });
+      }
+    }
+
+    // Update lead creator if it was a new lead
+    if (isNewLead && assignedUser) {
+      lead.createdBy = assignedUser._id;
+      await lead.save();
+    }
+
+    // Create comprehensive call log for inbound call
+    const callLog = new CallLog({
+      leadId: lead._id,
+      userId: assignedUser ? assignedUser._id : null,
+      agentNumber: agent_number || virtualNum,
+      destinationNumber: callerNum, // For inbound, destination is the caller
+      callerId: callerNum,
+      virtualNumber: virtualNum, // CRITICAL: Store which virtual number was called
+      providerCallId: call_id,
+      callStatus: mapSmartfloStatus(call_status),
+      callDirection: "inbound",
+      queueId: queue_id,
+      queueWaitTime: queue_wait_time ? parseInt(queue_wait_time) : 0,
+      assignedAt: new Date(),
+      routingReason: queue_id ? "queue" : "direct",
+      startTime: start_time ? new Date(start_time) : new Date(),
+      source: "WEBHOOK",
+      webhookData,
+    });
+
+    await callLog.save();
+    
+    // SMART CACHE: Invalidate call and entry cache for affected user
+    smartInvalidate('calls', callLog.userId?.toString());
+    if (callLog.leadId) {
+      smartInvalidate('entries', callLog.userId?.toString());
+    }
+    console.log("🧠 SMART CACHE: Invalidated call+entry cache for inbound call");
+
+    // Update lead with inbound call information
+    lead.lastCallDate = new Date();
+    lead.lastCallStatus = "inbound_call";
+    
+    // Track inbound call count
+    if (!lead.totalInboundCalls) lead.totalInboundCalls = 0;
+    lead.totalInboundCalls += 1;
+    
+    await lead.save();
+    
+    // SMART CACHE: Final targeted invalidation after all processing
+    smartInvalidate('calls', callLog.userId?.toString());
+    smartInvalidate('entries', callLog.userId?.toString());
+    console.log("🧠 SMART CACHE: Final targeted cache invalidation complete");
+
+    res.status(200).json({
+      success: true,
+      message: "Inbound call logged successfully",
+      callLogId: callLog._id,
+      leadId: lead._id,
+      leadName: lead.contactName || lead.customerName,
+      virtualNumber: virtualNum,
+      isNewLead,
+      assignedAgent: assignedUser ? assignedUser.username : null,
+    });
+  } catch (error) {
     res.status(200).json({
       success: false,
       message: "Webhook received but processing failed",
@@ -250,16 +511,81 @@ function mapSmartfloStatus(smartfloStatus) {
 }
 
 /**
- * Verify webhook signature (implement based on Smartflo documentation)
+ * Verify webhook signature for outbound calls
  */
-function verifyWebhookSignature(signature, payload) {
-  // Implement signature verification if Smartflo provides it
-  // const crypto = require('crypto');
-  // const secret = process.env.SMARTFLO_WEBHOOK_SECRET;
-  // const hash = crypto.createHmac('sha256', secret).update(JSON.stringify(payload)).digest('hex');
-  // return hash === signature;
+function verifyOutboundWebhookSignature(signature, payload) {
+  try {
+    const secret = process.env.SMARTFLO_OUTBOUND_WEBHOOK_SECRET || process.env.SMARTFLO_WEBHOOK_SECRET;
+    if (!secret) return true; // Skip verification if no secret configured
+    
+    const hash = crypto.createHmac('sha256', secret).update(JSON.stringify(payload)).digest('hex');
+    const expectedSignature = `sha256=${hash}`;
+    
+    return crypto.timingSafeEqual(
+      Buffer.from(signature),
+      Buffer.from(expectedSignature)
+    );
+  } catch (error) {
+    console.error('Outbound webhook signature verification error:', error);
+    return false;
+  }
+}
+
+/**
+ * Verify webhook signature for inbound calls
+ */
+function verifyInboundWebhookSignature(signature, payload) {
+  try {
+    const secret = process.env.SMARTFLO_INBOUND_WEBHOOK_SECRET || process.env.SMARTFLO_WEBHOOK_SECRET;
+    if (!secret) return true; // Skip verification if no secret configured
+    
+    const hash = crypto.createHmac('sha256', secret).update(JSON.stringify(payload)).digest('hex');
+    const expectedSignature = `sha256=${hash}`;
+    
+    return crypto.timingSafeEqual(
+      Buffer.from(signature),
+      Buffer.from(expectedSignature)
+    );
+  } catch (error) {
+    console.error('Inbound webhook signature verification error:', error);
+    return false;
+  }
+}
+
+/**
+ * Helper function to create lead for inbound calls
+ */
+async function createLeadForInboundCall(phoneNumber, assignedUser) {
+  // Find a default user to assign as creator (preferably admin)
+  let defaultUser = assignedUser;
   
-  return true; // For now, accept all webhooks
+  if (!defaultUser) {
+    defaultUser = await User.findOne({ role: { $in: ["Admin", "Superadmin"] } });
+  }
+  
+  if (!defaultUser) {
+    defaultUser = await User.findOne();
+  }
+  
+  if (!defaultUser) {
+    throw new Error('No users available to assign as lead creator');
+  }
+  
+  const lead = new Entry({
+    customerName: phoneNumber === "Unknown" ? `Unknown Inbound Caller` : `Incoming Caller ${phoneNumber}`,
+    mobileNumber: phoneNumber,
+    status: "Not Found",
+    organization: "Unknown",
+    category: "Incoming Call",
+    address: "Unknown",
+    state: "Unknown",
+    city: "Unknown",
+    createdBy: defaultUser._id, // CRITICAL: Set createdBy
+    source: "INCOMING_CALL",
+  });
+  
+  await lead.save();
+  return lead;
 }
 
 module.exports = exports;
