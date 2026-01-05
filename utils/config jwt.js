@@ -3,6 +3,7 @@
  * Implements refresh token rotation with token version tracking
  */
 const jwt = require("jsonwebtoken");
+const logger = require("./logger");
 
 // Token Secrets
 const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || process.env.JWT_SECRET || "access_secret_dev_key_change_in_prod";
@@ -115,7 +116,8 @@ const verifyToken = (req, res, next) => {
       });
     }
 
-    console.log("verifyToken: Token verified successfully", {
+    // Smart logging with rate limiting to prevent spam
+    logger.logTokenVerification({
       id: decoded.id,
       email: decoded.email,
       role: decoded.role

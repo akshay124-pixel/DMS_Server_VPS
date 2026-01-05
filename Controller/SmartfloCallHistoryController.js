@@ -616,9 +616,8 @@ exports.exportCallHistory = async (req, res) => {
       "Direction": call.callDirection,
       "Status": call.callStatus,
       "Duration (sec)": call.duration || 0,
-      "Disposition": call.disposition || "N/A",
       "Recording": call.recordingUrl ? "Yes" : "No",
-      "Remarks": call.remarks || "",
+      
     }));
     
     if (format === "csv") {
