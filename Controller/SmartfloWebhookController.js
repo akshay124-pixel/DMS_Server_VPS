@@ -25,6 +25,17 @@ exports.handleCallEvents = async (req, res) => {
   try {
     const webhookData = req.body;
     
+    // Enhanced webhook logging for debugging
+    console.log("📱 WEBHOOK RECEIVED:", {
+      headers: {
+        signature: req.headers['x-smartflo-signature'] || req.headers['x-smartflo-secret'],
+        contentType: req.headers['content-type'],
+        userAgent: req.headers['user-agent']
+      },
+      body: JSON.stringify(webhookData, null, 2),
+      timestamp: new Date().toISOString()
+    });
+    
     console.log("📱 OUTBOUND WEBHOOK: Processing call event", {
       event_type: webhookData.event_type,
       call_status: webhookData.call_status,
@@ -276,6 +287,28 @@ exports.handleCallEvents = async (req, res) => {
 
     await callLog.save();
     
+    // Recording URL fallback mechanism - fetch recording if missing after call completion
+    if (callLog.callStatus === "completed" && !callLog.recordingUrl && callLog.providerCallId) {
+      console.log(`⏰ Scheduling recording fetch for completed call ${callLog.providerCallId}`);
+      // Schedule recording fetch after delay (recordings might not be ready immediately)
+      setTimeout(async () => {
+        try {
+          const smartfloClient = require('../services/smartfloClient');
+          const recordingData = await smartfloClient.getRecordingUrl(callLog.providerCallId);
+          if (recordingData && recordingData.recording_url) {
+            const updatedCallLog = await CallLog.findById(callLog._id);
+            if (updatedCallLog && !updatedCallLog.recordingUrl) {
+              updatedCallLog.recordingUrl = recordingData.recording_url;
+              await updatedCallLog.save();
+              console.log(`✅ Recording URL fetched via API for call ${callLog.providerCallId}`);
+            }
+          }
+        } catch (error) {
+          console.error(`❌ Failed to fetch recording for call ${callLog.providerCallId}:`, error.message);
+        }
+      }, 30000); // Wait 30 seconds for recording to be ready
+    }
+    
     // SMART CACHE: Invalidate only call-related cache and refresh
     smartInvalidate('calls', callLog.userId?.toString());
     if (process.env.NODE_ENV === 'development') {
@@ -352,6 +385,17 @@ exports.handleCallEvents = async (req, res) => {
 exports.handleInboundCall = async (req, res) => {
   try {
     const webhookData = req.body;
+    
+    // Enhanced webhook logging for debugging
+    console.log("📞 INBOUND WEBHOOK RECEIVED:", {
+      headers: {
+        signature: req.headers['x-smartflo-signature'] || req.headers['x-smartflo-secret'],
+        contentType: req.headers['content-type'],
+        userAgent: req.headers['user-agent']
+      },
+      body: JSON.stringify(webhookData, null, 2),
+      timestamp: new Date().toISOString()
+    });
     
     // SECURITY: Verify inbound webhook signature
     const signature = req.headers['x-smartflo-signature'] || req.headers['x-smartflo-secret'];
@@ -506,7 +550,13 @@ exports.handleInboundCall = async (req, res) => {
  * Map Smartflo call status to CRM status
  */
 function mapSmartfloStatus(smartfloStatus) {
+  if (!smartfloStatus) return "initiated";
+  
+  // Normalize to lowercase for comparison
+  const status = smartfloStatus.toLowerCase();
+  
   const statusMap = {
+    // Standard Smartflo events
     "call.initiated": "initiated",
     "call.ringing": "ringing",
     "call.answered": "answered",
@@ -515,6 +565,7 @@ function mapSmartfloStatus(smartfloStatus) {
     "call.no_answer": "no_answer",
     "call.busy": "busy",
     "call.cancelled": "cancelled",
+    
     // Direct status values
     "initiated": "initiated",
     "ringing": "ringing",
@@ -524,9 +575,30 @@ function mapSmartfloStatus(smartfloStatus) {
     "no_answer": "no_answer",
     "busy": "busy",
     "cancelled": "cancelled",
+    
+    // Alternative formats Smartflo might use
+    "answer": "answered",
+    "pickup": "answered",
+    "connected": "answered",
+    "hangup": "completed",
+    "end": "completed",
+    "finished": "completed",
+    "noanswer": "no_answer",
+    "timeout": "no_answer",
+    "reject": "failed",
+    "error": "failed",
+    "declined": "failed",
+    "unreachable": "failed",
   };
 
-  return statusMap[smartfloStatus] || "initiated";
+  const mappedStatus = statusMap[status] || "initiated";
+  
+  // Log unmapped statuses for debugging
+  if (!statusMap[status] && smartfloStatus !== "initiated") {
+    console.log(`⚠️ Unknown Smartflo status: "${smartfloStatus}" -> defaulting to "initiated"`);
+  }
+  
+  return mappedStatus;
 }
 
 /**
@@ -540,25 +612,24 @@ function verifyOutboundWebhookSignature(signature, payload) {
     if (!signature) return false;
     
     const hash = crypto.createHmac('sha256', secret).update(JSON.stringify(payload)).digest('hex');
-    const expectedSignature = `sha256=${hash}`;
     
-    // Handle different signature formats
-    const normalizedSignature = signature.startsWith('sha256=') ? signature : `sha256=${signature}`;
+    // Extract hex part from signature (remove sha256= prefix if present)
+    const normalizedSignature = signature.startsWith('sha256=') ? signature.substring(7) : signature;
     
-    // Ensure both strings have the same length before comparison
-    if (normalizedSignature.length !== expectedSignature.length) {
+    // Ensure both hex strings have the same length before comparison
+    if (normalizedSignature.length !== hash.length) {
       console.log('Signature length mismatch:', {
         received: normalizedSignature.length,
-        expected: expectedSignature.length,
+        expected: hash.length,
         receivedSig: normalizedSignature.substring(0, 20) + '...',
-        expectedSig: expectedSignature.substring(0, 20) + '...'
+        expectedSig: hash.substring(0, 20) + '...'
       });
       return false;
     }
     
     return crypto.timingSafeEqual(
-      Buffer.from(normalizedSignature, 'utf8'),
-      Buffer.from(expectedSignature, 'utf8')
+      Buffer.from(normalizedSignature, 'hex'),
+      Buffer.from(hash, 'hex')
     );
   } catch (error) {
     console.error('Outbound webhook signature verification error:', error);
@@ -577,23 +648,22 @@ function verifyInboundWebhookSignature(signature, payload) {
     if (!signature) return false;
     
     const hash = crypto.createHmac('sha256', secret).update(JSON.stringify(payload)).digest('hex');
-    const expectedSignature = `sha256=${hash}`;
     
-    // Handle different signature formats
-    const normalizedSignature = signature.startsWith('sha256=') ? signature : `sha256=${signature}`;
+    // Extract hex part from signature (remove sha256= prefix if present)
+    const normalizedSignature = signature.startsWith('sha256=') ? signature.substring(7) : signature;
     
-    // Ensure both strings have the same length before comparison
-    if (normalizedSignature.length !== expectedSignature.length) {
+    // Ensure both hex strings have the same length before comparison
+    if (normalizedSignature.length !== hash.length) {
       console.log('Inbound signature length mismatch:', {
         received: normalizedSignature.length,
-        expected: expectedSignature.length
+        expected: hash.length
       });
       return false;
     }
     
     return crypto.timingSafeEqual(
-      Buffer.from(normalizedSignature, 'utf8'),
-      Buffer.from(expectedSignature, 'utf8')
+      Buffer.from(normalizedSignature, 'hex'),
+      Buffer.from(hash, 'hex')
     );
   } catch (error) {
     console.error('Inbound webhook signature verification error:', error);
