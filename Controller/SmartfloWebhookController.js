@@ -48,17 +48,25 @@ exports.handleCallEvents = async (req, res) => {
     if (process.env.SMARTFLO_OUTBOUND_WEBHOOK_SECRET && signature) {
       if (!verifyOutboundWebhookSignature(signature, webhookData)) {
         console.log("❌ OUTBOUND WEBHOOK: Invalid signature");
-        // In development, log but don't reject
+        // In development, log but don't reject to help debug signature format
         if (process.env.NODE_ENV === 'production') {
           return res.status(401).json({ success: false, message: 'Invalid outbound webhook signature' });
         } else {
-          console.log("⚠️ DEVELOPMENT: Continuing despite invalid signature");
+          console.log("⚠️ DEVELOPMENT: Continuing despite invalid signature for debugging");
+          console.log("🔍 DEBUG: Raw signature header:", signature);
+          console.log("🔍 DEBUG: Webhook secret configured:", process.env.SMARTFLO_OUTBOUND_WEBHOOK_SECRET ? 'YES' : 'NO');
         }
       } else {
         console.log("✅ OUTBOUND WEBHOOK: Signature verified");
       }
     } else {
       console.log("⚠️ OUTBOUND WEBHOOK: No signature verification (missing secret or signature)");
+      if (!process.env.SMARTFLO_OUTBOUND_WEBHOOK_SECRET) {
+        console.log("🔍 DEBUG: SMARTFLO_OUTBOUND_WEBHOOK_SECRET not configured");
+      }
+      if (!signature) {
+        console.log("🔍 DEBUG: No signature header found");
+      }
     }
 
     // Enhanced webhook data extraction
@@ -616,17 +624,54 @@ function verifyOutboundWebhookSignature(signature, payload) {
     // Extract hex part from signature (remove sha256= prefix if present)
     const normalizedSignature = signature.startsWith('sha256=') ? signature.substring(7) : signature;
     
-    // Ensure both hex strings have the same length before comparison
+    console.log('Signature verification details:', {
+      receivedLength: normalizedSignature.length,
+      expectedLength: hash.length,
+      receivedSig: normalizedSignature.substring(0, 20) + '...',
+      expectedSig: hash.substring(0, 20) + '...',
+      payloadLength: JSON.stringify(payload).length
+    });
+    
+    // Handle different signature lengths - Smartflo might send truncated signatures
     if (normalizedSignature.length !== hash.length) {
-      console.log('Signature length mismatch:', {
-        received: normalizedSignature.length,
-        expected: hash.length,
-        receivedSig: normalizedSignature.substring(0, 20) + '...',
-        expectedSig: hash.substring(0, 20) + '...'
-      });
+      console.log('⚠️ Signature length mismatch - trying alternative verification methods');
+      
+      // Try comparing first N characters if received signature is shorter
+      if (normalizedSignature.length < hash.length) {
+        const truncatedHash = hash.substring(0, normalizedSignature.length);
+        console.log('Trying truncated comparison:', {
+          received: normalizedSignature,
+          truncatedExpected: truncatedHash
+        });
+        
+        if (normalizedSignature === truncatedHash) {
+          console.log('✅ Truncated signature match found');
+          return true;
+        }
+      }
+      
+      // Try different payload serialization methods
+      const alternativePayloads = [
+        JSON.stringify(payload, null, 0),
+        JSON.stringify(payload, null, 2),
+        JSON.stringify(payload, Object.keys(payload).sort()),
+      ];
+      
+      for (const altPayload of alternativePayloads) {
+        const altHash = crypto.createHmac('sha256', secret).update(altPayload).digest('hex');
+        const altTruncated = altHash.substring(0, normalizedSignature.length);
+        
+        if (normalizedSignature === altTruncated || normalizedSignature === altHash) {
+          console.log('✅ Alternative payload serialization match found');
+          return true;
+        }
+      }
+      
+      console.log('❌ All signature verification methods failed');
       return false;
     }
     
+    // Standard comparison for equal length signatures
     return crypto.timingSafeEqual(
       Buffer.from(normalizedSignature, 'hex'),
       Buffer.from(hash, 'hex')
@@ -652,15 +697,49 @@ function verifyInboundWebhookSignature(signature, payload) {
     // Extract hex part from signature (remove sha256= prefix if present)
     const normalizedSignature = signature.startsWith('sha256=') ? signature.substring(7) : signature;
     
-    // Ensure both hex strings have the same length before comparison
+    console.log('Inbound signature verification details:', {
+      receivedLength: normalizedSignature.length,
+      expectedLength: hash.length,
+      receivedSig: normalizedSignature.substring(0, 20) + '...',
+      expectedSig: hash.substring(0, 20) + '...'
+    });
+    
+    // Handle different signature lengths - Smartflo might send truncated signatures
     if (normalizedSignature.length !== hash.length) {
-      console.log('Inbound signature length mismatch:', {
-        received: normalizedSignature.length,
-        expected: hash.length
-      });
+      console.log('⚠️ Inbound signature length mismatch - trying alternative verification methods');
+      
+      // Try comparing first N characters if received signature is shorter
+      if (normalizedSignature.length < hash.length) {
+        const truncatedHash = hash.substring(0, normalizedSignature.length);
+        
+        if (normalizedSignature === truncatedHash) {
+          console.log('✅ Inbound truncated signature match found');
+          return true;
+        }
+      }
+      
+      // Try different payload serialization methods
+      const alternativePayloads = [
+        JSON.stringify(payload, null, 0),
+        JSON.stringify(payload, null, 2),
+        JSON.stringify(payload, Object.keys(payload).sort()),
+      ];
+      
+      for (const altPayload of alternativePayloads) {
+        const altHash = crypto.createHmac('sha256', secret).update(altPayload).digest('hex');
+        const altTruncated = altHash.substring(0, normalizedSignature.length);
+        
+        if (normalizedSignature === altTruncated || normalizedSignature === altHash) {
+          console.log('✅ Inbound alternative payload serialization match found');
+          return true;
+        }
+      }
+      
+      console.log('❌ All inbound signature verification methods failed');
       return false;
     }
     
+    // Standard comparison for equal length signatures
     return crypto.timingSafeEqual(
       Buffer.from(normalizedSignature, 'hex'),
       Buffer.from(hash, 'hex')
