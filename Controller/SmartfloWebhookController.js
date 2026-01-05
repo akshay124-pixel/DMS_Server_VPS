@@ -45,19 +45,6 @@ exports.handleCallEvents = async (req, res) => {
     
     // SECURITY: Verify outbound webhook signature
     const signature = req.headers['x-smartflo-signature'] || req.headers['x-smartflo-secret'];
-    
-    // TEMPORARY: Skip signature verification to allow webhook processing
-    // This is a temporary fix to allow calls to be processed while we debug signature issues
-    console.log("🔧 TEMPORARY: Skipping signature verification to allow webhook processing");
-    console.log("🔍 DEBUG INFO:", {
-      hasSignature: !!signature,
-      signatureValue: signature,
-      hasSecret: !!process.env.SMARTFLO_OUTBOUND_WEBHOOK_SECRET,
-      secretLength: process.env.SMARTFLO_OUTBOUND_WEBHOOK_SECRET?.length || 0
-    });
-    
-    // TODO: Re-enable signature verification once Smartflo signature format is confirmed
-    /*
     if (process.env.SMARTFLO_OUTBOUND_WEBHOOK_SECRET && signature) {
       if (!verifyOutboundWebhookSignature(signature, webhookData)) {
         console.log("❌ OUTBOUND WEBHOOK: Invalid signature");
@@ -67,12 +54,11 @@ exports.handleCallEvents = async (req, res) => {
           console.log("⚠️ DEVELOPMENT: Continuing despite invalid signature for debugging");
         }
       } else {
-        console.log("✅ OUTBOUND WEBHOOK: Signature verified");
+        console.log("✅ OUTBOUND WEBHOOK: Signature verified successfully");
       }
     } else {
       console.log("⚠️ OUTBOUND WEBHOOK: No signature verification (missing secret or signature)");
     }
-    */
 
     // Enhanced webhook data extraction
     const {
@@ -140,7 +126,25 @@ exports.handleCallEvents = async (req, res) => {
       // NEW: Additional detection for Smartflo India format
       (caller_id && !custom_identifier && virtualNum) ||
       // NEW: If we have caller_id but no outbound custom_identifier, it's likely inbound
-      (caller_id && !custom_identifier && event_type !== "call.initiated");
+      (caller_id && !custom_identifier && event_type !== "call.initiated") ||
+      // SMARTFLO SPECIFIC: If direction is NOT clicktocall and we have caller_id, it's inbound
+      (direction !== "clicktocall" && (caller_id || caller_id_number));
+    
+    // SMARTFLO SPECIFIC: clicktocall is always outbound
+    const isOutbound = direction === "clicktocall" || custom_identifier?.startsWith('CRM_');
+    
+    // Final determination
+    const callDirection = isOutbound ? "outbound" : (isInbound ? "inbound" : "outbound");
+    
+    console.log("🔍 CALL DIRECTION ANALYSIS:", {
+      direction,
+      custom_identifier,
+      caller_id,
+      caller_id_number,
+      isInbound,
+      isOutbound,
+      finalDirection: callDirection
+    });
     
     // If no call_id, generate one for tracking
     const callId = call_id || `WEBHOOK_${Date.now()}`;
@@ -160,12 +164,12 @@ exports.handleCallEvents = async (req, res) => {
 
     // CRITICAL: For inbound calls, phone to match is caller_id
     // For outbound calls, phone to match is destination_number
-    const phoneToMatch = isInbound ? 
+    const phoneToMatch = callDirection === "inbound" ? 
       (caller_id || caller_id_number || webhookData.caller_id_number || destination_number || call_to_number) : 
       (destination_number || call_to_number || webhookData.call_to_number);
 
     console.log("📞 PHONE MATCHING LOGIC:", {
-      isInbound,
+      callDirection,
       phoneToMatch,
       caller_id,
       caller_id_number: webhookData.caller_id_number,
@@ -186,10 +190,10 @@ exports.handleCallEvents = async (req, res) => {
       agent_number,
       answered_agent,
       agentNum,
-      isInbound
+      callDirection
     });
     
-    if (isInbound) {
+    if (callDirection === "inbound") {
       // For incoming calls, try to find agent by agent_number
       if (agentNum) {
         assignedUser = await User.findOne({ smartfloAgentNumber: agentNum });
@@ -216,18 +220,18 @@ exports.handleCallEvents = async (req, res) => {
       let lead = await Entry.findOne({ mobileNumber: phoneToMatch });
       
       // For incoming calls from unknown numbers, create a placeholder lead
-      if (!lead && isInbound && phoneToMatch) {
+      if (!lead && callDirection === "inbound" && phoneToMatch) {
         lead = await createLeadForInboundCall(phoneToMatch, assignedUser);
       }
       
       // CRITICAL: For inbound calls, if no lead found, still create one
-      if (!lead && isInbound && phoneToMatch) {
+      if (!lead && callDirection === "inbound" && phoneToMatch) {
         lead = await createLeadForInboundCall(phoneToMatch, assignedUser);
       }
       
       if (!lead) {
         // For inbound calls without phone number, still log the call
-        if (isInbound) {
+        if (callDirection === "inbound") {
           lead = await createLeadForInboundCall(phoneToMatch || "Unknown", assignedUser);
         } else {
           return res.status(200).json({ 
@@ -239,7 +243,7 @@ exports.handleCallEvents = async (req, res) => {
       }
 
       // Complete user assignment for inbound calls
-      if (isInbound) {
+      if (callDirection === "inbound") {
         // Try to find agent by lead creator if not already assigned
         if (!assignedUser && lead.createdBy) {
           assignedUser = await User.findById(lead.createdBy);
@@ -259,17 +263,17 @@ exports.handleCallEvents = async (req, res) => {
         leadId: lead._id,
         userId: assignedUser ? assignedUser._id : null,
         agentNumber: agentNum || virtualNum,
-        destinationNumber: isInbound ? (caller_id || caller_id_number || destination_number) : (destination_number || call_to_number),
+        destinationNumber: callDirection === "inbound" ? (caller_id || caller_id_number || destination_number) : (destination_number || call_to_number),
         callerId: caller_id || caller_id_number,
         virtualNumber: virtualNum, // CRITICAL: Store virtual number
         providerCallId: callId,
         customIdentifier: custom_identifier,
         callStatus: mapSmartfloStatus(call_status || event_type),
-        callDirection: isInbound ? "inbound" : "outbound", // CRITICAL: Set correct direction
+        callDirection: callDirection, // Use the determined direction
         queueId: queue_id,
         queueWaitTime: queue_wait_time ? parseInt(queue_wait_time) : 0,
-        assignedAt: isInbound ? new Date() : null,
-        routingReason: isInbound ? (queue_id ? "queue" : "direct") : "direct",
+        assignedAt: callDirection === "inbound" ? new Date() : null,
+        routingReason: callDirection === "inbound" ? (queue_id ? "queue" : "direct") : "direct",
         source: "WEBHOOK",
         webhookData,
       });
@@ -306,8 +310,10 @@ exports.handleCallEvents = async (req, res) => {
       }
       
       // CRITICAL: Update direction if it was wrong initially
-      if (isInbound && callLog.callDirection !== "inbound") {
+      if (callDirection === "inbound" && callLog.callDirection !== "inbound") {
         callLog.callDirection = "inbound";
+      } else if (callDirection === "outbound" && callLog.callDirection !== "outbound") {
+        callLog.callDirection = "outbound";
       }
     }
 
@@ -681,63 +687,38 @@ function verifyOutboundWebhookSignature(signature, payload) {
     
     if (!signature) return false;
     
-    const hash = crypto.createHmac('sha256', secret).update(JSON.stringify(payload)).digest('hex');
-    
-    // Extract hex part from signature (remove sha256= prefix if present)
-    const normalizedSignature = signature.startsWith('sha256=') ? signature.substring(7) : signature;
-    
-    console.log('Signature verification details:', {
-      receivedLength: normalizedSignature.length,
-      expectedLength: hash.length,
-      receivedSig: normalizedSignature.substring(0, 20) + '...',
-      expectedSig: hash.substring(0, 20) + '...',
-      payloadLength: JSON.stringify(payload).length
+    console.log('🔍 Signature verification attempt:', {
+      receivedSignature: signature,
+      configuredSecret: secret,
+      match: signature === secret
     });
     
-    // Handle different signature lengths - Smartflo might send truncated signatures
-    if (normalizedSignature.length !== hash.length) {
-      console.log('⚠️ Signature length mismatch - trying alternative verification methods');
-      
-      // Try comparing first N characters if received signature is shorter
-      if (normalizedSignature.length < hash.length) {
-        const truncatedHash = hash.substring(0, normalizedSignature.length);
-        console.log('Trying truncated comparison:', {
-          received: normalizedSignature,
-          truncatedExpected: truncatedHash
-        });
-        
-        if (normalizedSignature === truncatedHash) {
-          console.log('✅ Truncated signature match found');
-          return true;
-        }
-      }
-      
-      // Try different payload serialization methods
-      const alternativePayloads = [
-        JSON.stringify(payload, null, 0),
-        JSON.stringify(payload, null, 2),
-        JSON.stringify(payload, Object.keys(payload).sort()),
-      ];
-      
-      for (const altPayload of alternativePayloads) {
-        const altHash = crypto.createHmac('sha256', secret).update(altPayload).digest('hex');
-        const altTruncated = altHash.substring(0, normalizedSignature.length);
-        
-        if (normalizedSignature === altTruncated || normalizedSignature === altHash) {
-          console.log('✅ Alternative payload serialization match found');
-          return true;
-        }
-      }
-      
-      console.log('❌ All signature verification methods failed');
-      return false;
+    // Smartflo sends the secret itself as signature, not HMAC
+    if (signature === secret) {
+      console.log('✅ Signature verified: Direct secret match');
+      return true;
     }
     
-    // Standard comparison for equal length signatures
-    return crypto.timingSafeEqual(
-      Buffer.from(normalizedSignature, 'hex'),
-      Buffer.from(hash, 'hex')
-    );
+    // Fallback: Try HMAC verification in case Smartflo changes their method
+    const hash = crypto.createHmac('sha256', secret).update(JSON.stringify(payload)).digest('hex');
+    const normalizedSignature = signature.startsWith('sha256=') ? signature.substring(7) : signature;
+    
+    if (normalizedSignature === hash) {
+      console.log('✅ Signature verified: HMAC match');
+      return true;
+    }
+    
+    // Try truncated comparison
+    if (normalizedSignature.length < hash.length) {
+      const truncatedHash = hash.substring(0, normalizedSignature.length);
+      if (normalizedSignature === truncatedHash) {
+        console.log('✅ Signature verified: Truncated HMAC match');
+        return true;
+      }
+    }
+    
+    console.log('❌ Signature verification failed: No match found');
+    return false;
   } catch (error) {
     console.error('Outbound webhook signature verification error:', error);
     return false;
@@ -754,58 +735,38 @@ function verifyInboundWebhookSignature(signature, payload) {
     
     if (!signature) return false;
     
-    const hash = crypto.createHmac('sha256', secret).update(JSON.stringify(payload)).digest('hex');
-    
-    // Extract hex part from signature (remove sha256= prefix if present)
-    const normalizedSignature = signature.startsWith('sha256=') ? signature.substring(7) : signature;
-    
-    console.log('Inbound signature verification details:', {
-      receivedLength: normalizedSignature.length,
-      expectedLength: hash.length,
-      receivedSig: normalizedSignature.substring(0, 20) + '...',
-      expectedSig: hash.substring(0, 20) + '...'
+    console.log('🔍 Inbound signature verification attempt:', {
+      receivedSignature: signature,
+      configuredSecret: secret,
+      match: signature === secret
     });
     
-    // Handle different signature lengths - Smartflo might send truncated signatures
-    if (normalizedSignature.length !== hash.length) {
-      console.log('⚠️ Inbound signature length mismatch - trying alternative verification methods');
-      
-      // Try comparing first N characters if received signature is shorter
-      if (normalizedSignature.length < hash.length) {
-        const truncatedHash = hash.substring(0, normalizedSignature.length);
-        
-        if (normalizedSignature === truncatedHash) {
-          console.log('✅ Inbound truncated signature match found');
-          return true;
-        }
-      }
-      
-      // Try different payload serialization methods
-      const alternativePayloads = [
-        JSON.stringify(payload, null, 0),
-        JSON.stringify(payload, null, 2),
-        JSON.stringify(payload, Object.keys(payload).sort()),
-      ];
-      
-      for (const altPayload of alternativePayloads) {
-        const altHash = crypto.createHmac('sha256', secret).update(altPayload).digest('hex');
-        const altTruncated = altHash.substring(0, normalizedSignature.length);
-        
-        if (normalizedSignature === altTruncated || normalizedSignature === altHash) {
-          console.log('✅ Inbound alternative payload serialization match found');
-          return true;
-        }
-      }
-      
-      console.log('❌ All inbound signature verification methods failed');
-      return false;
+    // Smartflo sends the secret itself as signature, not HMAC
+    if (signature === secret) {
+      console.log('✅ Inbound signature verified: Direct secret match');
+      return true;
     }
     
-    // Standard comparison for equal length signatures
-    return crypto.timingSafeEqual(
-      Buffer.from(normalizedSignature, 'hex'),
-      Buffer.from(hash, 'hex')
-    );
+    // Fallback: Try HMAC verification in case Smartflo changes their method
+    const hash = crypto.createHmac('sha256', secret).update(JSON.stringify(payload)).digest('hex');
+    const normalizedSignature = signature.startsWith('sha256=') ? signature.substring(7) : signature;
+    
+    if (normalizedSignature === hash) {
+      console.log('✅ Inbound signature verified: HMAC match');
+      return true;
+    }
+    
+    // Try truncated comparison
+    if (normalizedSignature.length < hash.length) {
+      const truncatedHash = hash.substring(0, normalizedSignature.length);
+      if (normalizedSignature === truncatedHash) {
+        console.log('✅ Inbound signature verified: Truncated HMAC match');
+        return true;
+      }
+    }
+    
+    console.log('❌ Inbound signature verification failed: No match found');
+    return false;
   } catch (error) {
     console.error('Inbound webhook signature verification error:', error);
     return false;
