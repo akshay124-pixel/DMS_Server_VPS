@@ -255,8 +255,10 @@ const buildFilter = (req, normalizedRole) => {
     filter.status = dashboardFilter;
   }
 
-  // DEBUG: Log the final filter
-  console.log("🔍 Final filter:", JSON.stringify(filter, null, 2));
+  // DEBUG: Log the final filter (only in development)
+  if (process.env.NODE_ENV === 'development') {
+    console.log("🔍 Final filter:", JSON.stringify(filter, null, 2));
+  }
 
   return filter;
 };
