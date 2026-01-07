@@ -30,18 +30,27 @@ exports.getCallSummary = async (req, res) => {
       dateFilter.userId = mongoose.Types.ObjectId.createFromHexString(userId);
     }
     
+    
     if (startDate || endDate) {
-      dateFilter.createdAt = {};
-      if (startDate) dateFilter.createdAt.$gte = new Date(startDate);
+      const dateQuery = {};
+      if (startDate) dateQuery.$gte = new Date(startDate);
       if (endDate) {
         const end = new Date(endDate);
         end.setHours(23, 59, 59, 999);
-        dateFilter.createdAt.$lte = end;
+        dateQuery.$lte = end;
       }
+      
+      // Use $or to check if record was created OR updated in the range
+      dateFilter.$or = [
+        { createdAt: dateQuery },
+        { updatedAt: dateQuery }
+      ];
     } else {
       // Default to last 30 days
       const thirtyDaysAgo = new Date();
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      
+      // For default view, we can stick to createdAt or use same logic
       dateFilter.createdAt = { $gte: thirtyDaysAgo };
     }
 
@@ -134,14 +143,21 @@ exports.getAgentPerformance = async (req, res) => {
       dateFilter.userId = mongoose.Types.ObjectId.createFromHexString(currentUser.id);
     }
     
+    
     if (startDate || endDate) {
-      dateFilter.createdAt = {};
-      if (startDate) dateFilter.createdAt.$gte = new Date(startDate);
+      const dateQuery = {};
+      if (startDate) dateQuery.$gte = new Date(startDate);
       if (endDate) {
         const end = new Date(endDate);
         end.setHours(23, 59, 59, 999);
-        dateFilter.createdAt.$lte = end;
+        dateQuery.$lte = end;
       }
+      
+      // Use $or to check if record was created OR updated in the range
+      dateFilter.$or = [
+        { createdAt: dateQuery },
+        { updatedAt: dateQuery }
+      ];
     } else {
       // Default to today only
       const today = new Date();
@@ -312,13 +328,20 @@ exports.getCallTrends = async (req, res) => {
 
     // Date range
     if (queryStartDate || queryEndDate) {
-      filter.createdAt = {};
-      if (queryStartDate) filter.createdAt.$gte = new Date(queryStartDate);
+      const dateQuery = {};
+      
+      if (queryStartDate) dateQuery.$gte = new Date(queryStartDate);
       if (queryEndDate) {
         const end = new Date(queryEndDate);
         end.setHours(23, 59, 59, 999);
-        filter.createdAt.$lte = end;
+        dateQuery.$lte = end;
       }
+      
+      // Use $or to check if record was created OR updated in the range
+      filter.$or = [
+        { createdAt: dateQuery },
+        { updatedAt: dateQuery }
+      ];
     } else {
       // Default to today only
       const today = new Date();
