@@ -43,13 +43,18 @@ exports.clickToCall = async (req, res) => {
     // 3) Use user's agent number as caller ID (dynamic caller ID)
     const callerId = user.smartfloAgentNumber; // ✅ KEY CHANGE
     const customIdentifier = `CRM_${leadId}_${Date.now()}`;
+    const customerName = lead.customerName || lead.contactName || "Customer";
 
     // 4) Smartflo API call with user's agent number as caller ID
     const payload = {
       agentNumber: user.smartfloAgentNumber,
       destinationNumber: lead.mobileNumber,
-      callerId: callerId, // ✅ Dynamic caller ID
+      callerId: callerId,
       customIdentifier,
+      extraHeaders: {
+        "From-Name": customerName,
+        "X-Caller-Name": customerName,
+      }
     };
 
     console.log("ClickToCall payload", {
@@ -94,6 +99,7 @@ exports.clickToCall = async (req, res) => {
       providerCallId: callLog.providerCallId,
       customIdentifier,
       callerIdUsed: callerId, // ✅ Response में भी dynamic caller ID
+      newCallCount: lead.totalCallsMade
     });
   } catch (error) {
     console.error(
@@ -110,6 +116,7 @@ exports.clickToCall = async (req, res) => {
     });
   }
 };
+
 
 
 
