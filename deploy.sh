@@ -1,6 +1,4 @@
 #!/bin/bash
-# Check Ci Cd
-
 echo "🚀 Starting DMS Deployment..."
 
 cd /www/wwwroot/DMS_Server || exit 1
