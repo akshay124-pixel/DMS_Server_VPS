@@ -1,4 +1,5 @@
 #!/bin/bash
+# Check Ci Cd
 
 echo "🚀 Starting DMS Deployment..."
 
