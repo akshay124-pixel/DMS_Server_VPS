@@ -69,6 +69,10 @@ const DataentryLogic = async (req, res) => {
 
     await newEntry.save();
 
+    // Populate createdBy to match fetch response structure
+    // This ensures the response has the same shape as fetchEntries
+    await newEntry.populate('createdBy', 'username _id');
+
     // REAL-TIME: No cache to invalidate - data is always fresh
     if (process.env.NODE_ENV === 'development') {
       console.log("🔄 REAL-TIME: Entry created - no cache invalidation needed");
@@ -169,24 +173,24 @@ const buildFilter = (req, normalizedRole) => {
     if (process.env.NODE_ENV === 'development') {
       console.log("🔍 Date filter - Raw dates:", { startDate, endDate });
     }
-    
+
     if (startDate && endDate) {
       // TIMEZONE FIX: Parse dates as local dates, not UTC
       const start = new Date(startDate + 'T00:00:00');
       const end = new Date(endDate + 'T23:59:59.999');
-      
+
       if (process.env.NODE_ENV === 'development') {
-        console.log("🔍 Date filter - Converted dates:", { 
-          start: start.toISOString(), 
+        console.log("🔍 Date filter - Converted dates:", {
+          start: start.toISOString(),
           end: end.toISOString(),
           startLocal: start.toLocaleString(),
           endLocal: end.toLocaleString()
         });
       }
-      
+
       // CRITICAL: Use ONLY createdAt for date filtering to prevent unwanted entries
       filter.createdAt = { $gte: start, $lte: end };
-      
+
       // IMPORTANT: Clear any existing $or conditions that might conflict with date range
       // This prevents monthly filters from overriding the specific date range
       if (filter.$or) {
@@ -195,7 +199,7 @@ const buildFilter = (req, normalizedRole) => {
         }
         delete filter.$or;
       }
-      
+
     } else if (startDate) {
       const start = new Date(startDate + 'T00:00:00');
       if (process.env.NODE_ENV === 'development') {
@@ -345,7 +349,7 @@ const fetchEntries = async (req, res) => {
         hasMore: skip + entries.length < total,
       },
     };
-    
+
     // NO CACHING - Real-time data for perfect filter and pagination behavior
     if (process.env.NODE_ENV === 'development') {
       console.log("📊 REAL-TIME: Returning fresh data (no caching)");
@@ -457,7 +461,7 @@ const editEntry = async (req, res) => {
     const updatedEntry = await Entry.findByIdAndUpdate(req.params.id, updateData, {
       new: true,
       runValidators: true,
-    }).lean();
+    }).populate('createdBy', 'username _id').lean();
 
     // REAL-TIME: No cache to invalidate - data is always fresh
     if (process.env.NODE_ENV === 'development') {
@@ -641,7 +645,7 @@ const bulkUploadStocks = async (req, res) => {
 const exportentry = async (req, res) => {
   try {
     const normalizedRole = req.user.role.charAt(0).toUpperCase() + req.user.role.slice(1).toLowerCase();
-    
+
     let entries;
     if (normalizedRole === "Admin" || normalizedRole === "Superadmin") {
       entries = await Entry.find().populate("createdBy", "username").lean();
@@ -817,7 +821,7 @@ const fetchAllEntries = async (req, res) => {
 const getEntryCounts = async (req, res) => {
   try {
     const normalizedRole = req.user.role.charAt(0).toUpperCase() + req.user.role.slice(1).toLowerCase();
-    
+
     if (!mongoose.Types.ObjectId.isValid(req.user.id)) {
       return res.status(400).json({
         success: false,
@@ -855,7 +859,7 @@ const getEntryCounts = async (req, res) => {
     const now = new Date();
     const currentMonth = now.getMonth();
     const currentYear = now.getFullYear();
-    
+
     // Create monthly filter combining base filter with monthly date conditions
     // Monthly filter should apply base filters AND monthly date condition
     const monthlyDateCondition = {
@@ -878,13 +882,13 @@ const getEntryCounts = async (req, res) => {
         },
       ],
     };
-    
+
     // Combine base filter with monthly date condition using $and
     // This ensures base filters (search, organization, etc.) are applied AND monthly condition
     const monthlyFilter = filter.$or || filter.$and
       ? { $and: [filter, monthlyDateCondition] }
       : { ...filter, ...monthlyDateCondition };
-    
+
     // Use aggregation to count monthly calls WITHOUT fetching documents
     // This is optimized to only return counts, not full documents
     const monthlyCallsResult = await Entry.aggregate([
@@ -929,7 +933,7 @@ const getEntryCounts = async (req, res) => {
         },
       },
     ]);
-    
+
     const monthlyCalls = monthlyCallsResult[0]?.totalMonthlyCalls || 0;
 
     // Get status-based counts
@@ -974,7 +978,7 @@ const getEntryCounts = async (req, res) => {
         closeTypeCounts: closeTypeMap,
       },
     };
-    
+
     // NO CACHING - Real-time data for accurate dashboard statistics
     if (process.env.NODE_ENV === 'development') {
       console.log("📊 REAL-TIME: Returning fresh entry counts (no caching)");
@@ -1064,7 +1068,7 @@ const sendEntryEmail = async (req, res) => {
       });
     }
 
-   const subject = `Your Journey with Promark Techsolutions Begins!`;
+    const subject = `Your Journey with Promark Techsolutions Begins!`;
     const text = `Thank you for connecting with Promark – a 22-year-old company with a legacy in EdTech, AV, and Furniture, owning its own factories, serving government, private, and autonomous organisations in India.
   Proudly part of the "Make in India" initiative.`;
     const html = `

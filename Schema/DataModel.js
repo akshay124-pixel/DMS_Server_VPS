@@ -3,12 +3,10 @@ const mongoose = require("mongoose");
 const EntrySchema = new mongoose.Schema({
   customerName: {
     type: String,
-
     trim: true,
   },
   contactName: {
     type: String,
-
     trim: true,
   },
   email: {
@@ -34,17 +32,11 @@ const EntrySchema = new mongoose.Schema({
   },
   address: {
     type: String,
-
     trim: true,
-
-    maxlength: [200, "Address cannot exceed 200 characters"],
   },
   organization: {
     type: String,
-
     trim: true,
-
-    maxlength: [100, "Organization cannot exceed 100 characters"],
   },
   category: {
     type: String,
@@ -71,7 +63,6 @@ const EntrySchema = new mongoose.Schema({
   remarks: {
     type: String,
     trim: true,
-    maxlength: [500, "Remarks cannot exceed 500 characters"],
     default: "",
   },
   createdAt: {
@@ -104,7 +95,6 @@ const EntrySchema = new mongoose.Schema({
       remarks: {
         type: String,
         trim: true,
-        maxlength: [500, "Remarks cannot exceed 500 characters"],
       },
       timestamp: {
         type: Date,
