@@ -8,6 +8,7 @@ const User = require("../Schema/Model");
 const XLSX = require("xlsx");
 const { sendMail } = require("../utils/mailer");
 const { smartInvalidate } = require("../Middleware/CacheMiddleware");
+const { parse, format, isValid } = require("date-fns");
 
 /**
  * Sanitize phone number - extract last 10 digits
@@ -569,10 +570,40 @@ const bulkUploadStocks = async (req, res) => {
       category: entry["Category"] ? String(entry["Category"]).trim() : "",
       city: entry["District"] ? String(entry["District"]).trim() : "",
       state: entry["State"] ? String(entry["State"]).trim() : "",
-      status: entry["Status"] ? String(entry["Status"]).trim() : "Not Found",
-      remarks: entry["Remarks"] ? String(entry["Remarks"]).trim() : "",
-      createdAt: entry.createdAt ? new Date(entry.createdAt) : new Date(),
-      updatedAt: entry.updatedAt ? new Date(entry.updatedAt) : new Date(),
+      status: (entry["Status"] || entry["status"]) ? String(entry["Status"] || entry["status"]).trim() : "Not Found",
+      remarks: (entry["Remarks"] || entry["remarks"]) ? String(entry["Remarks"] || entry["remarks"]).trim() : "",
+      createdAt: (() => {
+        const val = entry["Created At"];
+        if (val) {
+          if (val instanceof Date) return val;
+          // Try custom format first (slashes)
+          let parsed = parse(String(val), "dd/MM/yyyy", new Date());
+          if (isValid(parsed)) return parsed;
+          // Try custom format (hyphens) - STRICT DD-MM-YYYY
+          parsed = parse(String(val), "dd-MM-yyyy", new Date());
+          if (isValid(parsed)) return parsed;
+          // Try standard parsing
+          const standard = new Date(val);
+          if (!isNaN(standard.getTime())) return standard;
+        }
+        return entry.createdAt ? new Date(entry.createdAt) : new Date();
+      })(),
+      updatedAt: (() => {
+        const val = entry["Updated At"];
+        if (val) {
+          if (val instanceof Date) return val;
+          // Try custom format (slashes)
+          let parsed = parse(String(val), "dd/MM/yyyy", new Date());
+          if (isValid(parsed)) return parsed;
+          // Try custom format (hyphens) - STRICT DD-MM-YYYY
+          parsed = parse(String(val), "dd-MM-yyyy", new Date());
+          if (isValid(parsed)) return parsed;
+          // Try standard parsing
+          const standard = new Date(val);
+          if (!isNaN(standard.getTime())) return standard;
+        }
+        return entry.updatedAt ? new Date(entry.updatedAt) : new Date();
+      })(),
       createdBy: req.user.id,
     }));
 
@@ -667,13 +698,13 @@ const exportentry = async (req, res) => {
       "District": entry.city || "",
       "State": entry.state || "",
       "Status": entry.status || "Not Found",
-      "Remarks": entry.remarks || "Not Found",
+      "Remarks": entry.remarks || "", // Align default with Frontend
       "Created By": entry.createdBy?.username || "",
-      "Created At": entry.createdAt ? new Date(entry.createdAt).toLocaleDateString() : "",
+      "Created At": entry.createdAt ? new Date(entry.createdAt) : "",
     }));
 
-    // Create XLSX workbook
-    const ws = XLSX.utils.json_to_sheet(formattedEntries);
+    // Create XLSX workbook with STRICT date format DD-MM-YYYY
+    const ws = XLSX.utils.json_to_sheet(formattedEntries, { dateNF: "dd-mm-yyyy" });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Customer Entries");
 
