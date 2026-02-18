@@ -571,8 +571,8 @@ const bulkUploadStocks = async (req, res) => {
       state: entry["State"] ? String(entry["State"]).trim() : "",
       status: entry["Status"] ? String(entry["Status"]).trim() : "Not Found",
       remarks: entry["Remarks"] ? String(entry["Remarks"]).trim() : "",
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: entry.createdAt ? new Date(entry.createdAt) : new Date(),
+      updatedAt: entry.updatedAt ? new Date(entry.updatedAt) : new Date(),
       createdBy: req.user.id,
     }));
 
